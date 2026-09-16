@@ -148,7 +148,7 @@ jobs:
                           val builder = GestureDescription.Builder()
                           chunks[i].forEachIndexed { k, pt ->
                               val path = Path().apply { moveTo(maxOf(0f, pt.x), maxOf(0f, pt.y)) }
-                              builder.addStroke(GestureDescription.StrokeDescription(path, k * gapMs, 10L))
+                              builder.addStroke(GestureDescription.StrokeDescription(path, k * gapMs, 8L))
                           }
                           dispatchGesture(builder.build(), object : GestureResultCallback() {
                               override fun onCompleted(g: GestureDescription?) = send(i + 1)
@@ -223,10 +223,27 @@ jobs:
               private val scale = 4               // scan a 1/4-size copy of the screen for speed
 
               // settings (from MainActivity)
-              private var rules: Array<FloatArray> = emptyArray()
+              private var enabledColours = booleanArrayOf(true, true, true, true)
+
+              // special ringed balloons must be popped blue -> red -> yellow -> green
+              private var nextSpecial = 0
+              private var specialLastSeen = 0L
+              private var pendingSpecial: FloatArray? = null   // x, y, colour, timeMs
+
+              companion object {
+                  // colour, hueMin, hueMax, satMin, satMax, valMin (tuned on Google Store Playground screenshots)
+                  private val RULES = arrayOf(
+                      floatArrayOf(0f, 203f, 222f, 0.45f, 1.00f, 0.55f),
+                      floatArrayOf(1f, 0f, 14f, 0.60f, 1.00f, 0.75f),
+                      floatArrayOf(1f, 355f, 360f, 0.60f, 1.00f, 0.75f),
+                      floatArrayOf(2f, 44f, 64f, 0.30f, 1.00f, 0.65f),
+                      floatArrayOf(3f, 128f, 154f, 0.35f, 0.74f, 0.62f)
+                  )
+                  private val RING_HUE = floatArrayOf(213f, 3f, 51f, 133f)
+              }
               private var maxTaps = 15
               private var skipTopPct = 8
-              private val tapGapMs = 15L
+              private val tapGapMs = 12L
 
               override fun onBind(intent: Intent?): IBinder? = null
 
@@ -267,14 +284,9 @@ jobs:
 
               private fun loadSettings() {
                   val p = getSharedPreferences("cfg", MODE_PRIVATE)
-                  // hueMin, hueMax, satMin, satMax, valMin  (tuned on Google Store Playground screenshots)
-                  val all = mapOf(
-                      "blue" to listOf(floatArrayOf(203f, 222f, 0.45f, 1.00f, 0.55f)),
-                      "red" to listOf(floatArrayOf(0f, 14f, 0.60f, 1.00f, 0.75f), floatArrayOf(355f, 360f, 0.60f, 1.00f, 0.75f)),
-                      "yellow" to listOf(floatArrayOf(44f, 64f, 0.30f, 1.00f, 0.65f)),
-                      "green" to listOf(floatArrayOf(128f, 154f, 0.35f, 0.74f, 0.62f))
+                  enabledColours = booleanArrayOf(
+                      p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
                   )
-                  rules = all.filterKeys { p.getBoolean(it, true) }.values.flatten().toTypedArray()
                   maxTaps = p.getInt("maxTaps", 15)
                   skipTopPct = p.getInt("skipTop", 8)
               }
@@ -319,26 +331,35 @@ jobs:
                   }
               }
 
-              private fun colourMatch(r: Int, g: Int, b: Int): Boolean {
+              private fun colourMatch(r: Int, g: Int, b: Int, hs: FloatArray): Int {
                   val mx = maxOf(r, maxOf(g, b)); val mn = minOf(r, minOf(g, b)); val d = mx - mn
-                  if (d == 0 || mx == 0) return false
-                  val v = mx / 255f
+                  if (mx == 0) { hs[0] = 0f; hs[1] = 0f; return -1 }
                   val s = d.toFloat() / mx
-                  var h = when (mx) {
+                  var h = if (d == 0) 0f else when (mx) {
                       r -> 60f * (g - b) / d
                       g -> 60f * (b - r) / d + 120f
                       else -> 60f * (r - g) / d + 240f
                   }
                   if (h < 0) h += 360f
-                  for (rule in rules) {
-                      if (h >= rule[0] && h <= rule[1] && s >= rule[2] && s <= rule[3] && v >= rule[4]) return true
+                  hs[0] = h; hs[1] = s
+                  if (d == 0) return -1
+                  val v = mx / 255f
+                  for (rule in RULES) {
+                      if (h >= rule[1] && h <= rule[2] && s >= rule[3] && s <= rule[4] && v >= rule[5]) return rule[0].toInt()
                   }
-                  return false
+                  return -1
+              }
+
+              private fun hueDiff(a: Float, b: Float): Float {
+                  val d = abs(a - b) % 360f
+                  return minOf(d, 360f - d)
               }
 
               private fun scanAndTap() {
                   val img = reader?.acquireLatestImage() ?: return
                   val hits = ArrayList<PointF>()
+                  val now = SystemClock.uptimeMillis()
+                  val nowRel = (now - startedAt).toFloat()
                   try {
                       val plane = img.planes[0]
                       val buf = plane.buffer
@@ -349,22 +370,28 @@ jobs:
                       val sx = screenW.toFloat() / w
                       val sy = screenH.toFloat() / h
 
-                      // 1. mark every pixel that looks like a balloon colour
+                      // 1. label each pixel with a balloon colour (0 blue, 1 red, 2 yellow, 3 green, -1 none)
                       val top = h * skipTopPct / 100
-                      val mask = BooleanArray(w * h)
-                      for (y in top until h) for (x in 0 until w) {
+                      val label = ByteArray(w * h) { -1 }
+                      val hue = FloatArray(w * h)
+                      val sat = FloatArray(w * h)
+                      val hs = FloatArray(2)
+                      for (y in 0 until h) for (x in 0 until w) {
                           val i = y * rowStride + x * px
-                          mask[y * w + x] = colourMatch(
-                              buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff
-                          )
+                          val c = colourMatch(buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff, hs)
+                          val k = y * w + x
+                          hue[k] = hs[0]; sat[k] = hs[1]
+                          if (y >= top) label[k] = c.toByte()
                       }
 
-                      // 2. group touching pixels into blobs and keep the round, balloon-sized ones
+                      // 2. group same-colour pixels into blobs, keep round balloon-sized ones
                       val seen = BooleanArray(w * h)
                       val stack = IntArray(w * h)
-                      val blobs = ArrayList<FloatArray>()   // cx, cy, size
+                      val normal = ArrayList<FloatArray>()    // cx, cy, size, colour  (scaled px)
+                      val specials = ArrayList<FloatArray>()  // cx, cy, size, colour
                       for (start in 0 until w * h) {
-                          if (!mask[start] || seen[start]) continue
+                          val c = label[start].toInt()
+                          if (c < 0 || seen[start]) continue
                           var sp = 0; stack[sp++] = start; seen[start] = true
                           var n = 0; var sumX = 0L; var sumY = 0L
                           var minX = w; var maxX = 0; var minY = h; var maxY = 0
@@ -372,65 +399,88 @@ jobs:
                           while (sp > 0) {
                               val idx = stack[--sp]; val x = idx % w; val y = idx / w
                               n++; sumX += x; sumY += y; members.add(idx)
-                              if (x < minX) minX = x; if (x > maxX) maxX = x
-                              if (y < minY) minY = y; if (y > maxY) maxY = y
-                              if (x + 1 < w && mask[idx + 1] && !seen[idx + 1]) { seen[idx + 1] = true; stack[sp++] = idx + 1 }
-                              if (x > 0 && mask[idx - 1] && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
-                              if (y + 1 < h && mask[idx + w] && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
-                              if (y > 0 && mask[idx - w] && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
+                              if (x < minX) minX = x
+                              if (x > maxX) maxX = x
+                              if (y < minY) minY = y
+                              if (y > maxY) maxY = y
+                              if (x + 1 < w && label[idx + 1].toInt() == c && !seen[idx + 1]) { seen[idx + 1] = true; stack[sp++] = idx + 1 }
+                              if (x > 0 && label[idx - 1].toInt() == c && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
+                              if (y + 1 < h && label[idx + w].toInt() == c && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
+                              if (y > 0 && label[idx - w].toInt() == c && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
                           }
-                          if (n < 30 || minY <= top) continue            // tiny speck, or background under the top bar
+                          if (n < 30 || minY <= top) continue
                           val bw = maxX - minX + 1; val bh = maxY - minY + 1
                           val fill = n.toFloat() / (bw * bh)
                           val aspect = bw.toFloat() / bh
                           val big = maxOf(bw, bh)
+                          val cx = sumX.toFloat() / n; val cy = sumY.toFloat() / n
                           if (big <= 75 && aspect in 0.6f..1.66f && fill >= 0.5f) {
-                              blobs.add(floatArrayOf(sumX.toFloat() / n, sumY.toFloat() / n, n.toFloat()))
+                              val blob = floatArrayOf(cx, cy, n.toFloat(), c.toFloat())
+                              if (ringScore(cx, cy, (bw + bh) / 4f, c, hue, sat, w, h) >= 0.45f) specials.add(blob) else normal.add(blob)
                           } else if (big <= 150 && fill >= 0.35f && (aspect > 1.66f || aspect < 0.6f)) {
-                              // two balloons touching: split down the long side and tap both halves
                               val horizontal = aspect > 1f
                               val mid = if (horizontal) (minX + maxX) / 2f else (minY + maxY) / 2f
                               var ax = 0L; var ay = 0L; var an = 0; var bx = 0L; var by = 0L; var bn = 0
                               for (idx in members) {
                                   val x = idx % w; val y = idx / w
-                                  if ((if (horizontal) x.toFloat() else y.toFloat()) < mid) { ax += x; ay += y; an++ }
-                                  else { bx += x; by += y; bn++ }
+                                  if ((if (horizontal) x.toFloat() else y.toFloat()) < mid) { ax += x; ay += y; an++ } else { bx += x; by += y; bn++ }
                               }
-                              if (an > 0) blobs.add(floatArrayOf(ax.toFloat() / an, ay.toFloat() / an, an.toFloat()))
-                              if (bn > 0) blobs.add(floatArrayOf(bx.toFloat() / bn, by.toFloat() / bn, bn.toFloat()))
+                              if (an > 0) normal.add(floatArrayOf(ax.toFloat() / an, ay.toFloat() / an, an.toFloat(), c.toFloat()))
+                              if (bn > 0) normal.add(floatArrayOf(bx.toFloat() / bn, by.toFloat() / bn, bn.toFloat(), c.toFloat()))
                           }
                       }
 
-                      // 3. aim ahead of moving balloons, skip ones we just tapped, biggest first
-                      val now = SystemClock.uptimeMillis()
-                      val nowRel = (now - startedAt).toFloat()
                       val dt = (now - prevFrameAt).coerceAtLeast(1L).toFloat()
                       recentTaps.removeAll { nowRel - it[2] > tapCooldownMs }
                       val current = ArrayList<FloatArray>()
-                      blobs.sortByDescending { it[2] }
-                      for (bl in blobs) {
-                          val bx = (bl[0] + 0.5f) * sx
-                          val by = (bl[1] + 0.5f) * sy
-                          current.add(floatArrayOf(bx, by))
-                          if (hits.size >= maxTaps) continue
-                          val radius = kotlin.math.sqrt(bl[2] / 3.14f) * sx   // blob radius in screen px
-                          val guard = maxOf(radius * 1.3f, 90f)
-                          if (recentTaps.any { hypot(it[0] - bx, it[1] - by) < guard }) continue
-
-                          // match with the same balloon in the last frame to get its speed
+                      fun aim(bl: FloatArray): PointF {
+                          val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
                           var tx = bx; var ty = by
                           if (dt < 250f) {
                               val prev = prevBlobs.minByOrNull { hypot(it[0] - bx, it[1] - by) }
                               if (prev != null && hypot(prev[0] - bx, prev[1] - by) < 120f) {
-                                  val vx = ((bx - prev[0]) / dt).coerceIn(-1.5f, 1.5f)
-                                  val vy = ((by - prev[1]) / dt).coerceIn(-1.5f, 1.5f)
                                   val ahead = leadMs + hits.size * tapGapMs
-                                  tx = bx + vx * ahead; ty = by + vy * ahead
+                                  tx += ((bx - prev[0]) / dt).coerceIn(-1.5f, 1.5f) * ahead
+                                  ty += ((by - prev[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                               }
                           }
-                          tx = tx.coerceIn(1f, screenW - 2f); ty = ty.coerceIn(1f, screenH - 2f)
-                          if (onOverlay(tx, ty)) continue
-                          hits.add(PointF(tx, ty))
+                          return PointF(tx.coerceIn(1f, screenW - 2f), ty.coerceIn(1f, screenH - 2f))
+                      }
+                      for (bl in normal + specials) current.add(floatArrayOf((bl[0] + 0.5f) * sx, (bl[1] + 0.5f) * sy))
+
+                      // 3. special ringed balloons: strictly blue -> red -> yellow -> green
+                      if (specials.isNotEmpty()) specialLastSeen = now
+                      else if (now - specialLastSeen > 3000) { nextSpecial = 0; pendingSpecial = null }
+                      val pend = pendingSpecial
+                      if (pend != null && nowRel - pend[3] > 150f) {
+                          // did the last special pop? if it is still there, tap it again, otherwise move on
+                          val still = specials.any { it[3].toInt() == pend[2].toInt() &&
+                                  hypot((it[0] + 0.5f) * sx - pend[0], (it[1] + 0.5f) * sy - pend[1]) < 140f }
+                          pendingSpecial = null
+                          if (!still) nextSpecial = (pend[2].toInt() + 1) % 4
+                      }
+                      if (pendingSpecial == null) {
+                          val target = specials.filter { it[3].toInt() == nextSpecial }.maxByOrNull { it[2] }
+                          if (target != null) {
+                              val p = aim(target)
+                              if (!onOverlay(p.x, p.y)) {
+                                  hits.add(p)
+                                  pendingSpecial = floatArrayOf(p.x, p.y, nextSpecial.toFloat(), nowRel)
+                              }
+                          }
+                      }
+
+                      // 4. normal balloons of the ticked colours, biggest first, no double taps
+                      normal.sortByDescending { it[2] }
+                      for (bl in normal) {
+                          if (hits.size >= maxTaps) break
+                          if (!enabledColours[bl[3].toInt()]) continue
+                          val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
+                          val radius = kotlin.math.sqrt(bl[2] / 3.14f) * sx
+                          if (recentTaps.any { hypot(it[0] - bx, it[1] - by) < maxOf(radius * 1.3f, 90f) }) continue
+                          val p = aim(bl)
+                          if (onOverlay(p.x, p.y)) continue
+                          hits.add(p)
                           recentTaps.add(floatArrayOf(bx, by, nowRel))
                       }
                       prevBlobs = current
@@ -451,10 +501,36 @@ jobs:
                   if (hits.isNotEmpty()) {
                       busy = true
                       tapper.tapMany(hits, tapGapMs) {
-                          nextScanAt = SystemClock.uptimeMillis() + 60   // let the screen show the pops first
+                          nextScanAt = SystemClock.uptimeMillis() + 60
                           busy = false
                       }
                   }
+              }
+
+              /** How much of a thin ring of the same colour surrounds this balloon (0..1). */
+              private fun ringScore(cx: Float, cy: Float, r: Float, c: Int, hue: FloatArray, sat: FloatArray, w: Int, h: Int): Float {
+                  var best = 0f
+                  for (k in 24..45) {
+                      val rad = r * k / 20f
+                      var hit = 0; var tot = 0
+                      for (a in 0 until 48) {
+                          val t = a * Math.PI.toFloat() / 24f
+                          val cs = kotlin.math.cos(t); val sn = kotlin.math.sin(t)
+                          val xi = (cx + cs * (rad - 3)).toInt(); val yi = (cy + sn * (rad - 3)).toInt()
+                          val xo = (cx + cs * (rad + 3)).toInt(); val yo = (cy + sn * (rad + 3)).toInt()
+                          if (xi !in 0 until w || xo !in 0 until w || yi !in 0 until h || yo !in 0 until h) continue
+                          tot++
+                          val sIn = sat[yi * w + xi]; val sOut = sat[yo * w + xo]
+                          for (dr in -1..1) {
+                              val x = (cx + cs * (rad + dr)).toInt(); val y = (cy + sn * (rad + dr)).toInt()
+                              if (x !in 0 until w || y !in 0 until h) continue
+                              val k2 = y * w + x
+                              if (hueDiff(hue[k2], RING_HUE[c]) <= 14f && sat[k2] >= 0.2f && sat[k2] > sIn + 0.08f && sat[k2] > sOut + 0.08f) { hit++; break }
+                          }
+                      }
+                      if (tot >= 24) best = maxOf(best, hit.toFloat() / tot)
+                  }
+                  return best
               }
 
               private fun onOverlay(x: Float, y: Float): Boolean {
