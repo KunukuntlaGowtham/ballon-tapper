@@ -429,4 +429,125 @@ jobs:
           }
           ENDOFFILE
           mkdir -p app/src/main/java/com/example/balloontapper
-     
+          cat > app/src/main/java/com/example/balloontapper/MainActivity.kt <<'ENDOFFILE'
+          package com.example.balloontapper
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.View
+          import android.widget.*
+
+          class MainActivity : Activity() {
+
+              private lateinit var status: TextView
+              private lateinit var colors: EditText
+              private lateinit var tolerance: SeekBar
+              private lateinit var tolLabel: TextView
+              private lateinit var maxTaps: EditText
+              private lateinit var skipTop: EditText
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+                  val pad = (16 * resources.displayMetrics.density).toInt()
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad * 2, pad, pad)
+                  }
+                  fun label(t: String) = TextView(this).apply { text = t; setPadding(0, pad, 0, 0) }
+                  fun button(t: String, onClick: (View) -> Unit) =
+                      Button(this).apply { text = t; setOnClickListener(onClick) }
+
+                  status = TextView(this).apply { textSize = 15f }
+                  root.addView(status)
+
+                  root.addView(label("Balloon colours (hex, comma separated)"))
+                  colors = EditText(this).apply { setText(prefs.getString("colors", "#FF3B30, #FFCC00, #34C759, #007AFF")) }
+                  root.addView(colors)
+
+                  tolLabel = label("")
+                  root.addView(tolLabel)
+                  tolerance = SeekBar(this).apply {
+                      max = 120
+                      progress = prefs.getInt("tolerance", 40)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar?, v: Int, f: Boolean) { tolLabel.text = "Colour tolerance: $v" }
+                          override fun onStartTrackingTouch(s: SeekBar?) {}
+                          override fun onStopTrackingTouch(s: SeekBar?) {}
+                      })
+                  }
+                  tolLabel.text = "Colour tolerance: ${tolerance.progress}"
+                  root.addView(tolerance)
+
+                  root.addView(label("Max taps per scan"))
+                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 8).toString()) }
+                  root.addView(maxTaps)
+
+                  root.addView(label("Ignore top % of screen (score bar etc.)"))
+                  skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 10).toString()) }
+                  root.addView(skipTop)
+
+                  root.addView(button("1. Allow floating button") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                  })
+                  root.addView(button("2. Turn on tap service (Accessibility)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+                  root.addView(button("3. Save & launch overlay") { launch() })
+
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  val overlayOk = Settings.canDrawOverlays(this)
+                  val tapOk = TapService.instance != null
+                  status.text = "Floating button permission: ${if (overlayOk) "OK" else "NO"}\n" +
+                          "Tap service: ${if (tapOk) "OK" else "NO"}"
+              }
+
+              private fun launch() {
+                  getSharedPreferences("cfg", MODE_PRIVATE).edit()
+                      .putString("colors", colors.text.toString())
+                      .putInt("tolerance", tolerance.progress)
+                      .putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 20) ?: 8)
+                      .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 10)
+                      .apply()
+
+                  if (!Settings.canDrawOverlays(this)) { toast("Do step 1 first"); return }
+                  if (TapService.instance == null) { toast("Do step 2 first"); return }
+                  if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
+
+                  val mpm = getSystemService(MediaProjectionManager::class.java)
+                  @Suppress("DEPRECATION")
+                  startActivityForResult(mpm.createScreenCaptureIntent(), 1)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  @Suppress("DEPRECATION")
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode != 1) return
+                  if (resultCode != RESULT_OK || data == null) { toast("Screen capture is needed to find balloons"); return }
+                  startForegroundService(Intent(this, CaptureService::class.java)
+                      .putExtra("code", resultCode).putExtra("data", data))
+                  toast("Open your game and tap START")
+                  moveTaskToBack(true)
+              }
+
+              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+          }
+          ENDOFFILE
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BalloonTapper-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
