@@ -138,10 +138,12 @@ jobs:
                   return super.onUnbind(intent)
               }
 
-              /** Taps points two at a time (like two fingers), pairs spaced by gapMs, then calls done(). */
+              /** Taps points four at a time (like four fingers), groups spaced by gapMs, then calls done(). */
               fun tapMany(points: List<PointF>, gapMs: Long, holdMs: Long, done: () -> Unit) {
-                  var batch = GestureDescription.getMaxStrokeCount().coerceAtLeast(2)
-                  if (batch % 2 == 1) batch -= 1
+                  val fingers = 4
+                  val maxStrokes = GestureDescription.getMaxStrokeCount()
+                  val batch = if (maxStrokes >= fingers) maxStrokes - maxStrokes % fingers else maxOf(1, maxStrokes)
+                  val perGroup = minOf(fingers, batch)
                   val chunks = points.chunked(batch)
                   fun send(i: Int) {
                       if (i >= chunks.size) { done(); return }
@@ -149,8 +151,8 @@ jobs:
                           val builder = GestureDescription.Builder()
                           chunks[i].forEachIndexed { k, pt ->
                               val path = Path().apply { moveTo(maxOf(0f, pt.x), maxOf(0f, pt.y)) }
-                              val pairStart = (k / 2) * gapMs          // both taps of a pair start together
-                              builder.addStroke(GestureDescription.StrokeDescription(path, pairStart, holdMs))
+                              val groupStart = (k / perGroup) * gapMs   // all taps in a group of four start together
+                              builder.addStroke(GestureDescription.StrokeDescription(path, groupStart, holdMs))
                           }
                           dispatchGesture(builder.build(), object : GestureResultCallback() {
                               override fun onCompleted(g: GestureDescription?) = send(i + 1)
@@ -257,12 +259,13 @@ jobs:
               private val tapCooldownMs = 300f
               private val leadMs = 60f
               private var nextSpecial = 0
+              private var frenzyUntil = 0L                         // rush mode when the screen floods with balloons
               private var specialLastSeen = 0L
               private var pendingSpecial: FloatArray? = null       // x, y, colour, time
 
               // settings
               private var enabledColours = booleanArrayOf(true, true, true, true)
-              private var maxTaps = 12
+              private var maxTaps = 16
               private var skipTopPct = 8
               private var tapGapMs = 6L
               private var tapHoldMs = 6L
@@ -324,9 +327,9 @@ jobs:
                   enabledColours = booleanArrayOf(
                       p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
                   )
-                  maxTaps = p.getInt("maxTaps", 12)
+                  maxTaps = p.getInt("maxTaps", 16)
                   skipTopPct = p.getInt("skipTop", 8)
-                  // taps go out two at a time (two fingers); tapGapMs = pause between pairs
+                  // taps go out four at a time (four fingers); tapGapMs = pause between groups
                   when (p.getInt("speed", 1)) {
                       0 -> { tapGapMs = 60L; tapHoldMs = 25L; settleMs = 70L; loopMs = 25L }
                       1 -> { tapGapMs = 35L; tapHoldMs = 20L; settleMs = 45L; loopMs = 18L }
@@ -490,7 +493,7 @@ jobs:
                               // single balloon
                               val blob = floatArrayOf(cx, cy, n.toFloat(), c.toFloat())
                               if (ringScore(cx, cy, (bwid + bhei) / 4f, c, w, h) >= 0.45f) specials.add(blob) else normal.add(blob)
-                          } else if (big <= 220 && fill >= 0.35f) {
+                          } else if (fill >= 0.30f) {
                               // crowd of touching balloons: tap the middle of each filled grid cell
                               val cell = 18
                               val cols = bwid / cell + 1; val rows = bhei / cell + 1
@@ -501,7 +504,7 @@ jobs:
                                   cnt[g]++; gx[g] += x.toLong(); gy[g] += y.toLong()
                               }
                               for (g in 0 until cols * rows) {
-                                  if (cnt[g] >= cell * cell * 0.45f)
+                                  if (cnt[g] >= cell * cell * 0.40f)
                                       normal.add(floatArrayOf(gx[g].toFloat() / cnt[g], gy[g].toFloat() / cnt[g], cnt[g].toFloat(), c.toFloat()))
                               }
                           }
@@ -520,7 +523,7 @@ jobs:
                               var best: FloatArray? = null; var bestD = 120f
                               for (pb in prevBlobs) { val d = hypot(pb[0] - bx, pb[1] - by); if (d < bestD) { bestD = d; best = pb } }
                               if (best != null) {
-                                  val ahead = leadMs + (hits.size / 2) * tapGapMs
+                                  val ahead = leadMs + (hits.size / 4) * tapGapMs
                                   tx += ((bx - best[0]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                                   ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                               }
@@ -550,13 +553,19 @@ jobs:
                           }
                       }
 
-                      // 5. normal balloons, biggest first
-                      normal.sortByDescending { it[2] }
+                      // 5. normal balloons. When the screen floods, switch to rush mode for a moment.
+                      if (normal.size >= 12) frenzyUntil = now + 1500
+                      val frenzy = now < frenzyUntil
+                      val tapLimit = if (frenzy) maxOf(maxTaps * 3, 48) else maxTaps
+                      val minGuard = if (frenzy) 32f else 50f
+                      recentTaps.removeAll { nowRel - it[2] > (if (frenzy) 180f else tapCooldownMs) }
+                      // balloons closest to escaping off the top go first, then bigger ones
+                      normal.sortWith(compareBy<FloatArray> { it[1] }.thenByDescending { it[2] })
                       for (bl in normal) {
-                          if (hits.size >= maxTaps) break
+                          if (hits.size >= tapLimit) break
                           if (!enabledColours[bl[3].toInt()]) continue
                           val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          val guard = maxOf(sqrt(bl[2] / 3.14f) * sx * 0.8f, 50f)
+                          val guard = maxOf(sqrt(bl[2] / 3.14f) * sx * 0.7f, minGuard)
                           var blocked = false
                           for (t in recentTaps) if (hypot(t[0] - bx, t[1] - by) < guard) { blocked = true; break }
                           if (blocked) continue
@@ -579,8 +588,12 @@ jobs:
                   }
                   busy = true
                   busySince = SystemClock.uptimeMillis()
-                  tapper.tapMany(hits, tapGapMs, tapHoldMs) {
-                      nextScanAt = SystemClock.uptimeMillis() + settleMs
+                  val rush = SystemClock.uptimeMillis() < frenzyUntil
+                  val gap = if (rush) minOf(tapGapMs, 16L) else tapGapMs
+                  val hold = if (rush) minOf(tapHoldMs, 12L) else tapHoldMs
+                  val settle = if (rush) minOf(settleMs, 20L) else settleMs
+                  tapper.tapMany(hits, gap, hold) {
+                      nextScanAt = SystemClock.uptimeMillis() + settle
                       busy = false
                   }
               }
@@ -743,7 +756,7 @@ jobs:
                   }
 
                   root.addView(label("Max taps per scan"))
-                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 12).toString()) }
+                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 16).toString()) }
                   root.addView(maxTaps)
 
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
@@ -757,7 +770,7 @@ jobs:
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
                   root.addView(label("Tap speed"))
-                  val speedNames = listOf("Relaxed (2 taps every 60 ms)", "Normal (2 taps every 35 ms)", "Quick (2 taps every 20 ms)")
+                  val speedNames = listOf("Relaxed (4 taps every 60 ms)", "Normal (4 taps every 35 ms)", "Quick (4 taps every 20 ms)")
                   speedGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
                   speedNames.forEachIndexed { i, name ->
                       speedGroup.addView(RadioButton(this).apply { text = name; id = 100 + i })
@@ -793,7 +806,7 @@ jobs:
                   val ed = getSharedPreferences("cfg", MODE_PRIVATE).edit()
                   checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
                   ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
-                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(2, 40) ?: 12)
+                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(4, 60) ?: 16)
                       .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
                       .apply()
 
