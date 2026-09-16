@@ -62,6 +62,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
                   android:label="Balloon Tapper"
@@ -143,15 +144,20 @@ jobs:
                   val chunks = points.chunked(batch)
                   fun send(i: Int) {
                       if (i >= chunks.size) { done(); return }
-                      val builder = GestureDescription.Builder()
-                      chunks[i].forEachIndexed { k, pt ->
-                          val path = Path().apply { moveTo(pt.x, pt.y) }
-                          builder.addStroke(GestureDescription.StrokeDescription(path, k * gapMs, 10L))
+                      val ok = try {
+                          val builder = GestureDescription.Builder()
+                          chunks[i].forEachIndexed { k, pt ->
+                              val path = Path().apply { moveTo(maxOf(0f, pt.x), maxOf(0f, pt.y)) }
+                              builder.addStroke(GestureDescription.StrokeDescription(path, k * gapMs, 10L))
+                          }
+                          dispatchGesture(builder.build(), object : GestureResultCallback() {
+                              override fun onCompleted(g: GestureDescription?) = send(i + 1)
+                              override fun onCancelled(g: GestureDescription?) = send(i + 1)
+                          }, null)
+                      } catch (e: Exception) {
+                          android.util.Log.e("BalloonTapper", "tap error", e)
+                          false
                       }
-                      val ok = dispatchGesture(builder.build(), object : GestureResultCallback() {
-                          override fun onCompleted(g: GestureDescription?) = send(i + 1)
-                          override fun onCancelled(g: GestureDescription?) = send(i + 1)
-                      }, null)
                       if (!ok) done()
                   }
                   if (chunks.isEmpty()) done() else send(0)
@@ -303,7 +309,12 @@ jobs:
               private val loop = object : Runnable {
                   override fun run() {
                       if (projection == null) return
-                      if (running && !busy && SystemClock.uptimeMillis() >= nextScanAt) scanAndTap() else reader?.acquireLatestImage()?.close()
+                      try {
+                          if (running && !busy && SystemClock.uptimeMillis() >= nextScanAt) scanAndTap() else reader?.acquireLatestImage()?.close()
+                      } catch (e: Exception) {
+                          busy = false
+                          android.util.Log.e("BalloonTapper", "scan error", e)
+                      }
                       handler.postDelayed(this, 25)
                   }
               }
@@ -417,6 +428,7 @@ jobs:
                                   tx = bx + vx * ahead; ty = by + vy * ahead
                               }
                           }
+                          tx = tx.coerceIn(1f, screenW - 2f); ty = ty.coerceIn(1f, screenH - 2f)
                           if (onOverlay(tx, ty)) continue
                           hits.add(PointF(tx, ty))
                           recentTaps.add(floatArrayOf(bx, by, nowRel))
@@ -570,7 +582,12 @@ jobs:
                   root.addView(button("2. Turn on tap service (Accessibility)") {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
-                  root.addView(button("3. Save & launch overlay") { launch() })
+                  root.addView(button("3. Stop battery saver killing the app") {
+                      val pm = getSystemService(android.os.PowerManager::class.java)
+                      if (pm.isIgnoringBatteryOptimizations(packageName)) toast("Already allowed")
+                      else startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                  })
+                  root.addView(button("4. Save & launch overlay") { launch() })
 
                   setContentView(ScrollView(this).apply { addView(root) })
               }
