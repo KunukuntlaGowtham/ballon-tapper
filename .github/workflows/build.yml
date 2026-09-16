@@ -204,10 +204,9 @@ jobs:
               private val scale = 4               // scan a 1/4-size copy of the screen for speed
 
               // settings (from MainActivity)
-              private var targets = IntArray(0)
-              private var tolerance = 40
-              private var maxTaps = 8
-              private var skipTopPct = 10
+              private var rules: Array<FloatArray> = emptyArray()
+              private var maxTaps = 10
+              private var skipTopPct = 8
               private val tapGapMs = 40L
 
               override fun onBind(intent: Intent?): IBinder? = null
@@ -249,12 +248,16 @@ jobs:
 
               private fun loadSettings() {
                   val p = getSharedPreferences("cfg", MODE_PRIVATE)
-                  targets = (p.getString("colors", "#FF0000") ?: "#FF0000").split(",").mapNotNull {
-                      try { Color.parseColor(it.trim()) } catch (e: Exception) { null }
-                  }.toIntArray()
-                  tolerance = p.getInt("tolerance", 40)
-                  maxTaps = p.getInt("maxTaps", 8)
-                  skipTopPct = p.getInt("skipTop", 10)
+                  // hueMin, hueMax, satMin, satMax, valMin  (tuned on Google Store Playground screenshots)
+                  val all = mapOf(
+                      "blue" to floatArrayOf(205f, 219f, 0.60f, 1.00f, 0.60f),
+                      "red" to floatArrayOf(1f, 12f, 0.78f, 1.00f, 0.80f),
+                      "yellow" to floatArrayOf(46f, 62f, 0.40f, 1.00f, 0.70f),
+                      "green" to floatArrayOf(132f, 150f, 0.45f, 0.72f, 0.67f)
+                  )
+                  rules = all.filterKeys { p.getBoolean(it, true) }.values.toTypedArray()
+                  maxTaps = p.getInt("maxTaps", 10)
+                  skipTopPct = p.getInt("skipTop", 8)
               }
 
               private fun startCapture(code: Int, data: Intent) {
@@ -292,6 +295,23 @@ jobs:
                   }
               }
 
+              private fun colourMatch(r: Int, g: Int, b: Int): Boolean {
+                  val mx = maxOf(r, maxOf(g, b)); val mn = minOf(r, minOf(g, b)); val d = mx - mn
+                  if (d == 0 || mx == 0) return false
+                  val v = mx / 255f
+                  val s = d.toFloat() / mx
+                  var h = when (mx) {
+                      r -> 60f * (g - b) / d
+                      g -> 60f * (b - r) / d + 120f
+                      else -> 60f * (r - g) / d + 240f
+                  }
+                  if (h < 0) h += 360f
+                  for (rule in rules) {
+                      if (h >= rule[0] && h <= rule[1] && s >= rule[2] && s <= rule[3] && v >= rule[4]) return true
+                  }
+                  return false
+              }
+
               private fun scanAndTap() {
                   val img = reader?.acquireLatestImage() ?: return
                   val hits = ArrayList<PointF>()
@@ -305,37 +325,45 @@ jobs:
                       val sx = screenW.toFloat() / w
                       val sy = screenH.toFloat() / h
 
-                      fun matchAt(x: Int, y: Int): Boolean {
+                      // 1. mark every pixel that looks like a balloon colour
+                      val mask = BooleanArray(w * h)
+                      for (y in 0 until h) for (x in 0 until w) {
                           val i = y * rowStride + x * px
-                          val r = buf.get(i).toInt() and 0xff
-                          val g = buf.get(i + 1).toInt() and 0xff
-                          val b = buf.get(i + 2).toInt() and 0xff
-                          for (c in targets) {
-                              if (abs(r - Color.red(c)) <= tolerance &&
-                                  abs(g - Color.green(c)) <= tolerance &&
-                                  abs(b - Color.blue(c)) <= tolerance) return true
-                          }
-                          return false
+                          mask[y * w + x] = colourMatch(
+                              buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff
+                          )
                       }
+                      fun m(x: Int, y: Int) = x in 0 until w && y in 0 until h && mask[y * w + x]
 
-                      val radius = 12   // in scaled pixels (~48 real px)
+                      // 2. find round blobs (balloons), skip big coloured areas (background)
+                      val box = 30                         // ~120 real px
+                      val minGap = box * 0.8f
+                      val found = ArrayList<IntArray>()
                       var y = h * skipTopPct / 100
-                      while (y < h && hits.size < maxTaps) {
+                      while (y < h && found.size < maxTaps) {
                           var x = 0
-                          while (x < w && hits.size < maxTaps) {
-                              if (matchAt(x, y) && hits.none { hypot(it.x / sx - x, it.y / sy - y) < radius * 1.5f }) {
-                                  // aim for the middle of the coloured blob, not its edge
-                                  var cx = 0; var cy = 0; var n = 0
-                                  for (dy in 0..radius * 2) for (dx in -radius..radius) {
-                                      val xx = x + dx; val yy = y + dy
-                                      if (xx in 0 until w && yy in 0 until h && matchAt(xx, yy)) {
-                                          cx += xx; cy += yy; n++
+                          while (x < w && found.size < maxTaps) {
+                              if (mask[y * w + x] && found.none { hypot((it[0] - x).toFloat(), (it[1] - y).toFloat()) < minGap }) {
+                                  var sumX = 0; var sumY = 0; var n = 0
+                                  for (yy in maxOf(0, y - 4) until minOf(h, y + 2 * box))
+                                      for (xx in maxOf(0, x - box) until minOf(w, x + box))
+                                          if (mask[yy * w + xx]) { sumX += xx; sumY += yy; n++ }
+                                  if (n >= 15) {
+                                      val cx = sumX / n; val cy = sumY / n
+                                      var edge = 0; var edgeN = 0
+                                      for (d in -box..box) {
+                                          if (m(cx + d, cy - box)) edge++
+                                          if (m(cx + d, cy + box)) edge++
+                                          if (m(cx - box, cy + d)) edge++
+                                          if (m(cx + box, cy + d)) edge++
+                                          edgeN += 4
                                       }
-                                  }
-                                  if (n >= 6) {
-                                      val rx = (cx.toFloat() / n + 0.5f) * sx
-                                      val ry = (cy.toFloat() / n + 0.5f) * sy
-                                      if (!onOverlay(rx, ry)) hits.add(PointF(rx, ry))
+                                      val isBackground = edge.toFloat() / edgeN > 0.25f
+                                      if (!isBackground && found.none { hypot((it[0] - cx).toFloat(), (it[1] - cy).toFloat()) < minGap }) {
+                                          val rx = (cx + 0.5f) * sx
+                                          val ry = (cy + 0.5f) * sy
+                                          if (!onOverlay(rx, ry)) { found.add(intArrayOf(cx, cy)); hits.add(PointF(rx, ry)) }
+                                      }
                                   }
                               }
                               x += 2
@@ -446,9 +474,7 @@ jobs:
           class MainActivity : Activity() {
 
               private lateinit var status: TextView
-              private lateinit var colors: EditText
-              private lateinit var tolerance: SeekBar
-              private lateinit var tolLabel: TextView
+              private var checks: List<CheckBox> = emptyList()
               private lateinit var maxTaps: EditText
               private lateinit var skipTop: EditText
 
@@ -468,30 +494,18 @@ jobs:
                   status = TextView(this).apply { textSize = 15f }
                   root.addView(status)
 
-                  root.addView(label("Balloon colours (hex, comma separated)"))
-                  colors = EditText(this).apply { setText(prefs.getString("colors", "#FF3B30, #FFCC00, #34C759, #007AFF")) }
-                  root.addView(colors)
-
-                  tolLabel = label("")
-                  root.addView(tolLabel)
-                  tolerance = SeekBar(this).apply {
-                      max = 120
-                      progress = prefs.getInt("tolerance", 40)
-                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(s: SeekBar?, v: Int, f: Boolean) { tolLabel.text = "Colour tolerance: $v" }
-                          override fun onStartTrackingTouch(s: SeekBar?) {}
-                          override fun onStopTrackingTouch(s: SeekBar?) {}
-                      })
+                  root.addView(label("Balloon colours to pop (grey balloons are always skipped)"))
+                  val colourNames = listOf("blue" to "Blue", "red" to "Red", "yellow" to "Yellow", "green" to "Green")
+                  checks = colourNames.map { (key, name) ->
+                      CheckBox(this).apply { text = name; isChecked = prefs.getBoolean(key, true); tag = key }.also { root.addView(it) }
                   }
-                  tolLabel.text = "Colour tolerance: ${tolerance.progress}"
-                  root.addView(tolerance)
 
                   root.addView(label("Max taps per scan"))
-                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 8).toString()) }
+                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 10).toString()) }
                   root.addView(maxTaps)
 
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
-                  skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 10).toString()) }
+                  skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 8).toString()) }
                   root.addView(skipTop)
 
                   root.addView(button("1. Allow floating button") {
@@ -514,11 +528,10 @@ jobs:
               }
 
               private fun launch() {
-                  getSharedPreferences("cfg", MODE_PRIVATE).edit()
-                      .putString("colors", colors.text.toString())
-                      .putInt("tolerance", tolerance.progress)
-                      .putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 20) ?: 8)
-                      .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 10)
+                  val ed = getSharedPreferences("cfg", MODE_PRIVATE).edit()
+                  checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
+                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 20) ?: 10)
+                      .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
                       .apply()
 
                   if (!Settings.canDrawOverlays(this)) { toast("Do step 1 first"); return }
