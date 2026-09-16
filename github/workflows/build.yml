@@ -350,6 +350,212 @@ jobs:
                   if (tapper == null) {
                       running = false
                       Handler(Looper.getMainLooper()).post {
+                          overlay?.text = "START"
+                          Toast.makeText(this, "Turn on Balloon Tapper in Accessibility settings", Toast.LENGTH_LONG).show()
+                      }
+                      return
+                  }
+                  if (hits.isNotEmpty()) {
+                      busy = true
+                      tapper.tapMany(hits, tapGapMs) { busy = false }
+                  }
+              }
+
+              private fun onOverlay(x: Float, y: Float): Boolean {
+                  val p = overlayParams ?: return false
+                  val v = overlay ?: return false
+                  val pad = 40
+                  return x >= p.x - pad && x <= p.x + v.width + pad && y >= p.y - pad && y <= p.y + v.height + pad
+              }
+
+              @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+              private fun showOverlay() {
+                  val tv = TextView(this).apply {
+                      text = "START"
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.argb(200, 30, 30, 30))
+                      setPadding(36, 24, 36, 24)
+                  }
+                  val params = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 300 }
+
+                  var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
+                  var downTime = 0L; var moved = false
+                  tv.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX; downY = e.rawY; startX = params.x; startY = params.y
+                              downTime = SystemClock.uptimeMillis(); moved = false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - downX; val dy = e.rawY - downY
+                              if (abs(dx) > 15 || abs(dy) > 15) moved = true
+                              if (moved) {
+                                  params.x = startX + dx.toInt(); params.y = startY + dy.toInt()
+                                  wm.updateViewLayout(tv, params)
+                              }
+                          }
+                          MotionEvent.ACTION_UP -> if (!moved) {
+                              if (SystemClock.uptimeMillis() - downTime > 800) {
+                                  stopSelf()      // long-press = quit
+                              } else {
+                                  running = !running
+                                  tv.text = if (running) "STOP" else "START"
+                              }
+                          }
+                      }
+                      true
+                  }
+                  wm.addView(tv, params)
+                  overlay = tv
+                  overlayParams = params
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  overlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  virtualDisplay?.release()
+                  reader?.close()
+                  projection?.stop()
+                  projection = null
+                  if (::thread.isInitialized) thread.quitSafely()
+                  super.onDestroy()
+              }
+          }
+          ENDOFFILE
+          mkdir -p app/src/main/java/com/example/balloontapper
+     read("scanner").apply { start() }
+                  handler = Handler(thread.looper)
+                  wm = getSystemService(WindowManager::class.java)
+
+                  startCapture(code, data)
+                  showOverlay()
+                  return START_NOT_STICKY
+              }
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("tapper", "Balloon Tapper", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  val n = Notification.Builder(this, "tapper")
+                      .setContentTitle("Balloon Tapper is watching the screen")
+                      .setContentText("Long-press the floating button to quit")
+                      .setSmallIcon(android.R.drawable.ic_media_play)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 29)
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  else startForeground(1, n)
+              }
+
+              private fun loadSettings() {
+                  val p = getSharedPreferences("cfg", MODE_PRIVATE)
+                  targets = (p.getString("colors", "#FF0000") ?: "#FF0000").split(",").mapNotNull {
+                      try { Color.parseColor(it.trim()) } catch (e: Exception) { null }
+                  }.toIntArray()
+                  tolerance = p.getInt("tolerance", 40)
+                  maxTaps = p.getInt("maxTaps", 8)
+                  skipTopPct = p.getInt("skipTop", 10)
+              }
+
+              private fun startCapture(code: Int, data: Intent) {
+                  val size = Point()
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      val b = wm.maximumWindowMetrics.bounds
+                      size.set(b.width(), b.height())
+                  } else @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(size)
+                  screenW = size.x
+                  screenH = size.y
+
+                  val w = screenW / scale
+                  val h = screenH / scale
+                  val mpm = getSystemService(MediaProjectionManager::class.java)
+                  val proj = mpm.getMediaProjection(code, data)
+                  projection = proj
+                  proj.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { stopSelf() }
+                  }, handler)
+
+                  val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+                  reader = r
+                  virtualDisplay = proj.createVirtualDisplay(
+                      "tapper", w, h, resources.displayMetrics.densityDpi / scale,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler
+                  )
+                  handler.post(loop)
+              }
+
+              private val loop = object : Runnable {
+                  override fun run() {
+                      if (projection == null) return
+                      if (running && !busy) scanAndTap() else reader?.acquireLatestImage()?.close()
+                      handler.postDelayed(this, 50)
+                  }
+              }
+
+              private fun scanAndTap() {
+                  val img = reader?.acquireLatestImage() ?: return
+                  val hits = ArrayList<PointF>()
+                  try {
+                      val plane = img.planes[0]
+                      val buf = plane.buffer
+                      val rowStride = plane.rowStride
+                      val px = plane.pixelStride
+                      val w = img.width
+                      val h = img.height
+                      val sx = screenW.toFloat() / w
+                      val sy = screenH.toFloat() / h
+
+                      fun matchAt(x: Int, y: Int): Boolean {
+                          val i = y * rowStride + x * px
+                          val r = buf.get(i).toInt() and 0xff
+                          val g = buf.get(i + 1).toInt() and 0xff
+                          val b = buf.get(i + 2).toInt() and 0xff
+                          for (c in targets) {
+                              if (abs(r - Color.red(c)) <= tolerance &&
+                                  abs(g - Color.green(c)) <= tolerance &&
+                                  abs(b - Color.blue(c)) <= tolerance) return true
+                          }
+                          return false
+                      }
+
+                      val radius = 12   // in scaled pixels (~48 real px)
+                      var y = h * skipTopPct / 100
+                      while (y < h && hits.size < maxTaps) {
+                          var x = 0
+                          while (x < w && hits.size < maxTaps) {
+                              if (matchAt(x, y) && hits.none { hypot(it.x / sx - x, it.y / sy - y) < radius * 1.5f }) {
+                                  // aim for the middle of the coloured blob, not its edge
+                                  var cx = 0; var cy = 0; var n = 0
+                                  for (dy in 0..radius * 2) for (dx in -radius..radius) {
+                                      val xx = x + dx; val yy = y + dy
+                                      if (xx in 0 until w && yy in 0 until h && matchAt(xx, yy)) {
+                                          cx += xx; cy += yy; n++
+                                      }
+                                  }
+                                  if (n >= 6) {
+                                      val rx = (cx.toFloat() / n + 0.5f) * sx
+                                      val ry = (cy.toFloat() / n + 0.5f) * sy
+                                      if (!onOverlay(rx, ry)) hits.add(PointF(rx, ry))
+                                  }
+                              }
+                              x += 2
+                          }
+                          y += 2
+                      }
+                  } finally {
+                      img.close()
+                  }
+
+                  val tapper = TapService.instance
+                  if (tapper == null) {
+                      running = false
+                      Handler(Looper.getMainLooper()).post {
                           overlay?.text = "â–¶ START"
                           Toast.makeText(this, "Turn on Balloon Tapper in Accessibility settings", Toast.LENGTH_LONG).show()
                       }
