@@ -138,9 +138,10 @@ jobs:
                   return super.onUnbind(intent)
               }
 
-              /** Taps every point quickly, in batches the system allows, then calls done(). */
+              /** Taps points two at a time (like two fingers), pairs spaced by gapMs, then calls done(). */
               fun tapMany(points: List<PointF>, gapMs: Long, holdMs: Long, done: () -> Unit) {
-                  val batch = GestureDescription.getMaxStrokeCount().coerceAtLeast(1)
+                  var batch = GestureDescription.getMaxStrokeCount().coerceAtLeast(2)
+                  if (batch % 2 == 1) batch -= 1
                   val chunks = points.chunked(batch)
                   fun send(i: Int) {
                       if (i >= chunks.size) { done(); return }
@@ -148,7 +149,8 @@ jobs:
                           val builder = GestureDescription.Builder()
                           chunks[i].forEachIndexed { k, pt ->
                               val path = Path().apply { moveTo(maxOf(0f, pt.x), maxOf(0f, pt.y)) }
-                              builder.addStroke(GestureDescription.StrokeDescription(path, k * gapMs, holdMs))
+                              val pairStart = (k / 2) * gapMs          // both taps of a pair start together
+                              builder.addStroke(GestureDescription.StrokeDescription(path, pairStart, holdMs))
                           }
                           dispatchGesture(builder.build(), object : GestureResultCallback() {
                               override fun onCompleted(g: GestureDescription?) = send(i + 1)
@@ -260,7 +262,7 @@ jobs:
 
               // settings
               private var enabledColours = booleanArrayOf(true, true, true, true)
-              private var maxTaps = 30
+              private var maxTaps = 12
               private var skipTopPct = 8
               private var tapGapMs = 6L
               private var tapHoldMs = 6L
@@ -322,12 +324,13 @@ jobs:
                   enabledColours = booleanArrayOf(
                       p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
                   )
-                  maxTaps = p.getInt("maxTaps", 30)
+                  maxTaps = p.getInt("maxTaps", 12)
                   skipTopPct = p.getInt("skipTop", 8)
+                  // taps go out two at a time (two fingers); tapGapMs = pause between pairs
                   when (p.getInt("speed", 1)) {
-                      0 -> { tapGapMs = 10L; tapHoldMs = 8L; settleMs = 45L; loopMs = 20L }
-                      1 -> { tapGapMs = 5L; tapHoldMs = 5L; settleMs = 25L; loopMs = 10L }
-                      else -> { tapGapMs = 0L; tapHoldMs = 4L; settleMs = 15L; loopMs = 6L }
+                      0 -> { tapGapMs = 60L; tapHoldMs = 25L; settleMs = 70L; loopMs = 25L }
+                      1 -> { tapGapMs = 35L; tapHoldMs = 20L; settleMs = 45L; loopMs = 18L }
+                      else -> { tapGapMs = 20L; tapHoldMs = 15L; settleMs = 30L; loopMs = 12L }
                   }
               }
 
@@ -379,7 +382,7 @@ jobs:
                       try {
                           val now = SystemClock.uptimeMillis()
                           // watchdog: if a tap batch never reported back, don't stay stuck
-                          if (busy && now - busySince > 350) busy = false
+                          if (busy && now - busySince > 1200) busy = false
                           if (running && !busy && now >= nextScanAt && reader != null) scanAndTap()
                           else reader?.acquireLatestImage()?.close()
                       } catch (t: Throwable) {
@@ -517,7 +520,7 @@ jobs:
                               var best: FloatArray? = null; var bestD = 120f
                               for (pb in prevBlobs) { val d = hypot(pb[0] - bx, pb[1] - by); if (d < bestD) { bestD = d; best = pb } }
                               if (best != null) {
-                                  val ahead = leadMs + hits.size * tapGapMs
+                                  val ahead = leadMs + (hits.size / 2) * tapGapMs
                                   tx += ((bx - best[0]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                                   ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                               }
@@ -740,7 +743,7 @@ jobs:
                   }
 
                   root.addView(label("Max taps per scan"))
-                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 30).toString()) }
+                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 12).toString()) }
                   root.addView(maxTaps)
 
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
@@ -754,7 +757,7 @@ jobs:
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
                   root.addView(label("Tap speed"))
-                  val speedNames = listOf("Fast (safest)", "Turbo (recommended)", "Insane (multi-finger bursts)")
+                  val speedNames = listOf("Relaxed (2 taps every 60 ms)", "Normal (2 taps every 35 ms)", "Quick (2 taps every 20 ms)")
                   speedGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
                   speedNames.forEachIndexed { i, name ->
                       speedGroup.addView(RadioButton(this).apply { text = name; id = 100 + i })
@@ -790,7 +793,7 @@ jobs:
                   val ed = getSharedPreferences("cfg", MODE_PRIVATE).edit()
                   checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
                   ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
-                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 60) ?: 30)
+                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(2, 40) ?: 12)
                       .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
                       .apply()
 
