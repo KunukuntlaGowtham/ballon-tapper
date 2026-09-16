@@ -202,6 +202,15 @@ jobs:
 
               @Volatile private var running = false
               @Volatile private var busy = false
+              @Volatile private var nextScanAt = 0L
+
+              // memory used to avoid double taps and to aim ahead of moving balloons
+              private val recentTaps = ArrayList<FloatArray>()      // x, y, timeMs
+              private var prevBlobs = ArrayList<FloatArray>()       // x, y (screen px)
+              private var prevFrameAt = 0L
+              private val startedAt = SystemClock.uptimeMillis()
+              private val tapCooldownMs = 450f                      // don't re-tap the same spot for this long
+              private val leadMs = 70f                              // how far ahead to aim
 
               private var screenW = 0
               private var screenH = 0
@@ -294,7 +303,7 @@ jobs:
               private val loop = object : Runnable {
                   override fun run() {
                       if (projection == null) return
-                      if (running && !busy) scanAndTap() else reader?.acquireLatestImage()?.close()
+                      if (running && !busy && SystemClock.uptimeMillis() >= nextScanAt) scanAndTap() else reader?.acquireLatestImage()?.close()
                       handler.postDelayed(this, 25)
                   }
               }
@@ -359,7 +368,7 @@ jobs:
                               if (y + 1 < h && mask[idx + w] && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
                               if (y > 0 && mask[idx - w] && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
                           }
-                          if (n < 20 || minY <= top) continue            // tiny speck, or background under the top bar
+                          if (n < 30 || minY <= top) continue            // tiny speck, or background under the top bar
                           val bw = maxX - minX + 1; val bh = maxY - minY + 1
                           val fill = n.toFloat() / (bw * bh)
                           val aspect = bw.toFloat() / bh
@@ -381,14 +390,39 @@ jobs:
                           }
                       }
 
-                      // 3. biggest balloons first (easiest points), then tap
+                      // 3. aim ahead of moving balloons, skip ones we just tapped, biggest first
+                      val now = SystemClock.uptimeMillis()
+                      val nowRel = (now - startedAt).toFloat()
+                      val dt = (now - prevFrameAt).coerceAtLeast(1L).toFloat()
+                      recentTaps.removeAll { nowRel - it[2] > tapCooldownMs }
+                      val current = ArrayList<FloatArray>()
                       blobs.sortByDescending { it[2] }
                       for (bl in blobs) {
-                          if (hits.size >= maxTaps) break
-                          val rx = (bl[0] + 0.5f) * sx
-                          val ry = (bl[1] + 0.5f) * sy
-                          if (!onOverlay(rx, ry)) hits.add(PointF(rx, ry))
+                          val bx = (bl[0] + 0.5f) * sx
+                          val by = (bl[1] + 0.5f) * sy
+                          current.add(floatArrayOf(bx, by))
+                          if (hits.size >= maxTaps) continue
+                          val radius = kotlin.math.sqrt(bl[2] / 3.14f) * sx   // blob radius in screen px
+                          val guard = maxOf(radius * 1.3f, 90f)
+                          if (recentTaps.any { hypot(it[0] - bx, it[1] - by) < guard }) continue
+
+                          // match with the same balloon in the last frame to get its speed
+                          var tx = bx; var ty = by
+                          if (dt < 250f) {
+                              val prev = prevBlobs.minByOrNull { hypot(it[0] - bx, it[1] - by) }
+                              if (prev != null && hypot(prev[0] - bx, prev[1] - by) < 120f) {
+                                  val vx = ((bx - prev[0]) / dt).coerceIn(-1.5f, 1.5f)
+                                  val vy = ((by - prev[1]) / dt).coerceIn(-1.5f, 1.5f)
+                                  val ahead = leadMs + hits.size * tapGapMs
+                                  tx = bx + vx * ahead; ty = by + vy * ahead
+                              }
+                          }
+                          if (onOverlay(tx, ty)) continue
+                          hits.add(PointF(tx, ty))
+                          recentTaps.add(floatArrayOf(bx, by, nowRel))
                       }
+                      prevBlobs = current
+                      prevFrameAt = now
                   } finally {
                       img.close()
                   }
@@ -404,7 +438,10 @@ jobs:
                   }
                   if (hits.isNotEmpty()) {
                       busy = true
-                      tapper.tapMany(hits, tapGapMs) { busy = false }
+                      tapper.tapMany(hits, tapGapMs) {
+                          nextScanAt = SystemClock.uptimeMillis() + 60   // let the screen show the pops first
+                          busy = false
+                      }
                   }
               }
 
