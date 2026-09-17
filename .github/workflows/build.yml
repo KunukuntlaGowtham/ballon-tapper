@@ -668,6 +668,7 @@ jobs:
 
               // settings
               private var enabledColours = booleanArrayOf(true, true, true, true)
+              private var comboMode = false   // only blue & red, dead-centre, no misses
               private var maxTaps = 6
               private var fingersHuman = 1
               private var fingersMachine = 2
@@ -748,6 +749,7 @@ jobs:
                   enabledColours = booleanArrayOf(
                       p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
                   )
+                  comboMode = p.getBoolean("combo", false)
                   maxTaps = p.getInt("maxTaps", 6)
                   fingersHuman = p.getInt("fingersHuman", 1).coerceIn(1, 5)
                   fingersMachine = p.getInt("fingersMachine", 1).coerceIn(1, 5)
@@ -1018,7 +1020,7 @@ jobs:
                                   ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                               }
                           }
-                          if (human) {
+                          if (human && !comboMode) {
                               val p = humanizer.aim(tx, ty, sqrt(bl[2] / 3.14f) * sx)
                               tx = p.x; ty = p.y
                           }
@@ -1084,9 +1086,11 @@ jobs:
                       }
                       for (bl in normal) {
                           if (hits.size >= tapLimit) break
-                          if (!enabledColours[bl[3].toInt()]) continue
+                          val col = bl[3].toInt()
+                          if (comboMode && col != 0 && col != 1) continue   // combo: blue & red only
+                          if (!comboMode && !enabledColours[col]) continue
                           val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          if (human) {
+                          if (human && !comboMode) {
                               if ((ages[bl] ?: 0f) < reactMs) continue   // the eyes haven't caught it yet
                               if (humanizer.ignores()) continue          // looked straight past it
                           }
@@ -1490,6 +1494,7 @@ jobs:
               private lateinit var speedGroup: RadioGroup
               private lateinit var styleGroup: RadioGroup
               private lateinit var fxCheck: CheckBox
+              private lateinit var comboCheck: CheckBox
               private lateinit var gapInput: EditText
               private lateinit var maxTaps: EditText
               private lateinit var skipTop: EditText
@@ -1517,6 +1522,12 @@ jobs:
                   checks = colourNames.map { (key, name) ->
                       CheckBox(this).apply { text = name; isChecked = prefs.getBoolean(key, true); tag = key }.also { root.addView(it) }
                   }
+
+                  comboCheck = CheckBox(this).apply {
+                      text = "Combo mode: hit only Blue & Red, dead-centre (for multipliers)"
+                      isChecked = prefs.getBoolean("combo", false)
+                  }
+                  root.addView(comboCheck)
 
                   root.addView(label("Max taps per scan"))
                   maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 6).toString()) }
@@ -1615,6 +1626,7 @@ jobs:
                   val ed = getSharedPreferences("cfg", MODE_PRIVATE).edit()
                   checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
                   ed.putBoolean("fx", fxCheck.isChecked)
+                  ed.putBoolean("combo", comboCheck.isChecked)
                   ed.putInt("gapMs", gapInput.text.toString().toIntOrNull()?.let { if (it <= 0) 0 else it.coerceIn(5, 2000) } ?: 0)
                   ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
                   ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 3))
