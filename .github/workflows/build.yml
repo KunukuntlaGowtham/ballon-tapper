@@ -636,6 +636,7 @@ jobs:
               @Volatile private var busy = false
               @Volatile private var busySince = 0L
               @Volatile private var busyLimitMs = 2500L
+              private var lastSizeCheck = 0L
               @Volatile private var turbo = false               // manual full-speed machine mode for the finale
               private var turboBtn: TextView? = null
               private var turboParams: WindowManager.LayoutParams? = null
@@ -754,12 +755,18 @@ jobs:
                   if (humanizer.on) loopMs = 16L
               }
 
-              private fun startCapture(code: Int, data: Intent) {
+              /** The real screen size right now (changes when a game hides the bars or rotates). */
+              private fun currentScreenSize(): Point {
                   val size = Point()
                   if (Build.VERSION.SDK_INT >= 30) {
                       val b = wm.maximumWindowMetrics.bounds
                       size.set(b.width(), b.height())
                   } else @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(size)
+                  return size
+              }
+
+              private fun startCapture(code: Int, data: Intent) {
+                  val size = currentScreenSize()
                   screenW = size.x
                   screenH = size.y
 
@@ -786,6 +793,45 @@ jobs:
                   )
               }
 
+              /**
+               * Keep the capture matched to the live screen. Games often hide the status bar or flip to
+               * landscape when they go fullscreen; the mirror was sized once at START, so after that the
+               * frames come out letterboxed and the wrong size and nothing is detected. When the screen
+               * size changes we resize the virtual display and swap in a matching reader — no new capture
+               * permission needed, because the projection itself is still alive.
+               */
+              private fun syncCaptureSize() {
+                  val proj = projection ?: return
+                  val size = currentScreenSize()
+                  if (size.x == screenW && size.y == screenH) return
+                  if (size.x <= 0 || size.y <= 0) return
+                  screenW = size.x
+                  screenH = size.y
+                  val w = screenW / SCALE
+                  val h = screenH / SCALE
+                  try {
+                      val old = reader
+                      val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+                      val vd = virtualDisplay
+                      if (vd != null) {
+                          vd.resize(w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE))
+                          vd.surface = r.surface
+                          reader = r
+                          try { old?.close() } catch (_: Throwable) {}
+                      } else {
+                          reader = r
+                          virtualDisplay = proj.createVirtualDisplay(
+                              "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
+                              DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler)
+                          try { old?.close() } catch (_: Throwable) {}
+                      }
+                      ensureBuffers(w, h)
+                      Log.i(TAG, "capture resized to $screenW x $screenH")
+                  } catch (t: Throwable) {
+                      Log.e(TAG, "capture resize failed", t)
+                  }
+              }
+
               private fun releaseCapture() {
                   try { virtualDisplay?.release() } catch (_: Throwable) {}
                   try { reader?.close() } catch (_: Throwable) {}
@@ -803,6 +849,10 @@ jobs:
                           val now = SystemClock.uptimeMillis()
                           // watchdog: if a tap batch never reported back, don't stay stuck
                           if (busy && now - busySince > busyLimitMs) busy = false
+                          // follow the game if it changes screen size (fullscreen / rotation)
+                          if (running && projection != null && now - lastSizeCheck > 400) {
+                              lastSizeCheck = now; syncCaptureSize()
+                          }
                           if (running && !busy && now >= nextScanAt && reader != null) scanAndTap()
                           else reader?.acquireLatestImage()?.close()
                       } catch (t: Throwable) {
