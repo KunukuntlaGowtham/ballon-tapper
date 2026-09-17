@@ -28,10 +28,10 @@ from short gaps between bursts, not from a faster peak tap rate, so it clears
 more without tapping any less like a person.
 
 While the overlay is running there are two floating buttons: the main
-START/STOP button, and a **⚡ TURBO** button. Tap TURBO in the last few seconds
-of a round to blitz the finale at full machine speed (a single fast finger,
-which stays stable), then tap it again to hand control back to the human style.
-Both buttons can be dragged anywhere on screen.
+START/STOP button, and a **⚡ TURBO** button. Human play uses two thumbs; tap
+TURBO in the last few seconds of a round to blitz the finale at full machine
+speed with four fingers, then tap it again to hand control back to the human
+style. Both buttons can be dragged anywhere on screen.
 
 The tap speed and fixed-gap settings only apply to the machine style; the human
 styles work out their own timings.
