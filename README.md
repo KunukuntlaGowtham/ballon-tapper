@@ -21,5 +21,11 @@ launching the overlay (the floating button shows which style is running).
   top of what a hand really manages, and the aim loosens to pay for it, so more
   taps land off the balloon than on focused.
 
+Each human style also warms up over its first few seconds, occasionally taps a
+balloon twice when unsure it registered, and now and then overshoots a far
+balloon and darts back — all things a real hand does. The speed you get comes
+from short gaps between bursts, not from a faster peak tap rate, so it clears
+more without tapping any less like a person.
+
 The tap speed and fixed-gap settings only apply to the machine style; the human
 styles work out their own timings.

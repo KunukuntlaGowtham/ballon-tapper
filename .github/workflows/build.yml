@@ -159,12 +159,14 @@ jobs:
                   )
 
                   private val STYLES = arrayOf(
-                      // casual: about four taps a second in a burst, and in no rush between them
-                      Style(210f, 60f, 72f, 22f, 62f, 0.26f, 140f, 55f, 3, 2, 0.38f, 0.040f, 0.050f, 7000f, 380f, 0.35f),
-                      // focused: six or seven a second, steady aim, short breaks
-                      Style(140f, 35f, 52f, 15f, 44f, 0.18f, 90f, 30f, 4, 3, 0.30f, 0.025f, 0.025f, 11000f, 300f, 0.25f),
-                      // rapid: around ten a second, barely stops, and misses more because of it
-                      Style(105f, 28f, 40f, 12f, 32f, 0.12f, 60f, 22f, 5, 3, 0.36f, 0.050f, 0.010f, 16000f, 220f, 0.15f)
+                      // Per-tap timing stays where a real thumb is; the throughput gain comes from the
+                      // shorter settle between bursts (dead time, not something a tap analyser can see).
+                      // casual: about four taps a second in a burst, easy pace between them
+                      Style(200f, 58f, 70f, 22f, 58f, 0.24f, 95f, 40f, 4, 2, 0.38f, 0.040f, 0.050f, 8000f, 320f, 0.32f),
+                      // focused: six or seven a second, steady aim, brief glances away
+                      Style(130f, 33f, 50f, 14f, 40f, 0.16f, 55f, 22f, 5, 3, 0.30f, 0.025f, 0.025f, 13000f, 240f, 0.22f),
+                      // rapid: around ten a second in a burst, barely stops, looser aim to pay for it
+                      Style(95f, 25f, 38f, 11f, 28f, 0.10f, 34f, 14f, 6, 4, 0.36f, 0.050f, 0.010f, 18000f, 180f, 0.13f)
                   )
               }
 
@@ -182,6 +184,7 @@ jobs:
               private var pauseUntil = 0L
               private var nextPauseAt = 0L
               private var tiredness = 0f                       // 0 = fresh, 1 = worn out
+              private var startedMs = -1L                      // when this hand first started playing
 
               /** Bell-curve random value. Real timings and real aim scatter like this, not evenly. */
               fun gauss(mean: Float, sd: Float): Float {
@@ -261,9 +264,28 @@ jobs:
               fun travelMs(from: PointF, to: PointF, density: Float): Long {
                   val s = style
                   val dist = if (from.x < 0f) 0f else hypot(to.x - from.x, to.y - from.y) / maxOf(1f, density)
-                  return (gauss(s.travel + dist * s.perDp, s.travel * 0.3f) * tiredFactor())
-                      .coerceIn(s.travel * 0.55f, 900f).toLong()
+                  return (gauss(s.travel + dist * s.perDp, s.travel * 0.3f) * tiredFactor() * warmup())
+                      .coerceIn(s.travel * 0.5f, 900f).toLong()
               }
+
+              /**
+               * On a long reach the thumb sometimes overshoots and darts back to land. Returns a point
+               * slightly past the target to tap first, or null for a normal single move. The correction
+               * back to the real target follows as the next tap.
+               */
+              fun overshoot(from: PointF, to: PointF, density: Float): PointF? {
+                  if (from.x < 0f) return null
+                  val distDp = hypot(to.x - from.x, to.y - from.y) / maxOf(1f, density)
+                  if (distDp < 90f || !chance(0.12f)) return null
+                  val over = gauss(0.12f, 0.04f).coerceIn(0.05f, 0.25f)
+                  return PointF(to.x + (to.x - from.x) * over, to.y + (to.y - from.y) * over)
+              }
+
+              /** A person unsure a tap registered taps the same spot twice in quick succession. */
+              fun doubleTap(): Boolean = chance(if (level == RAPID) 0.05f else 0.03f)
+
+              /** Gap before a quick second tap on the same balloon. */
+              fun doubleGapMs(): Long = gauss(70f, 18f).coerceIn(45f, 120f).toLong()
 
               /** Pause after a burst, while the eyes pick the next balloons. */
               fun settleMs(): Long {
@@ -287,8 +309,18 @@ jobs:
 
               private fun tiredFactor(): Float = 1f + tiredness * style.tire
 
+              /** The first several seconds are a touch slower, the way a hand eases into a game. */
+              private fun warmup(): Float {
+                  if (startedMs < 0L) return 1f
+                  val since = lastTick - startedMs
+                  return if (since >= 6000L) 1f else 1.35f - 0.35f * (since / 6000f)
+              }
+              private var lastTick = 0L
+
               /** Slows down over a long session, with sharper patches and sloppier ones along the way. */
               fun tick(playedMs: Long) {
+                  if (startedMs < 0L) startedMs = playedMs
+                  lastTick = playedMs
                   val stint = (playedMs / 600000f).coerceIn(0f, 1f)          // ten minutes is a full stint
                   val wave = (sin(playedMs / 23000f) + 1f) / 2f
                   tiredness = (stint * 0.7f + wave * 0.3f).coerceIn(0f, 1f)
@@ -686,6 +718,9 @@ jobs:
                   if (customGapMs > 0) { tapGapMs = customGapMs; tapHoldMs = minOf(tapHoldMs, maxOf(4L, customGapMs - 1)) }
                   // play style: the human levels work out their own timings and ignore the speed above
                   humanizer.level = p.getInt("human", Humanizer.FOCUSED).coerceIn(Humanizer.OFF, Humanizer.RAPID)
+                  // human styles pace themselves through settle/travel; keep the scan loop tight so
+                  // the wait between bursts is the human pause, not loop overhead on top of it
+                  if (humanizer.on) loopMs = 8L
               }
 
               private fun startCapture(code: Int, data: Intent) {
@@ -1001,15 +1036,33 @@ jobs:
                   if (humanizer.on) {
                       // one finger, travelling from balloon to balloon, pressing for an uneven moment each time
                       val density = resources.displayMetrics.density
-                      val taps = ArrayList<TapService.Tap>(hits.size)
+                      val taps = ArrayList<TapService.Tap>(hits.size + 4)
                       var from = humanizer.handAt()
                       var at = 0L
                       for (p in hits) {
+                          // sometimes the thumb darts past a far balloon and corrects back onto it
+                          val over = humanizer.overshoot(from, p, density)
+                          if (over != null) {
+                              at += humanizer.travelMs(from, over, density)
+                              val h0 = maxOf(12L, humanizer.holdMs() / 2)
+                              val d0 = humanizer.drift()
+                              taps.add(TapService.Tap(over.x, over.y, at, h0, d0.x, d0.y))
+                              at += h0
+                              from = over
+                          }
                           at += humanizer.travelMs(from, p, density)
                           val hold = humanizer.holdMs()
                           val d = humanizer.drift()
                           taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
                           at += hold
+                          // unsure it registered, tap the same balloon again
+                          if (humanizer.doubleTap()) {
+                              at += humanizer.doubleGapMs()
+                              val h2 = humanizer.holdMs()
+                              val d2 = humanizer.drift()
+                              taps.add(TapService.Tap(p.x, p.y, at, h2, d2.x, d2.y))
+                              at += h2
+                          }
                           from = p
                       }
                       humanizer.handMovedTo(hits.last())
