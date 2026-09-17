@@ -605,7 +605,7 @@ jobs:
                       floatArrayOf(3f, 128f, 154f, 0.35f, 0.74f, 0.62f)
                   )
                   private val RING_HUE = floatArrayOf(213f, 3f, 51f, 133f)
-                  private const val SCALE = 5   // more downsampling = far less CPU per scan; balloons are big enough
+                  private const val SCALE = 8   // heavy downsampling = far less CPU/GPU per frame; balloons are big
               }
 
               // capture
@@ -669,6 +669,8 @@ jobs:
               // settings
               private var enabledColours = booleanArrayOf(true, true, true, true)
               private var maxTaps = 6
+              private var fingersHuman = 1
+              private var fingersMachine = 2
               private var skipTopPct = 8
               private var tapGapMs = 6L
               private var tapHoldMs = 6L
@@ -747,8 +749,10 @@ jobs:
                       p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
                   )
                   maxTaps = p.getInt("maxTaps", 6)
+                  fingersHuman = p.getInt("fingersHuman", 1).coerceIn(1, 5)
+                  fingersMachine = p.getInt("fingersMachine", 2).coerceIn(1, 5)
                   skipTopPct = p.getInt("skipTop", 8)
-                  showFx = p.getBoolean("fx", true)
+                  showFx = p.getBoolean("fx", false)   // off by default: the live rings cost extra every frame
                   // taps go out one after another; tapGapMs = pause between taps
                   when (p.getInt("speed", 1)) {
                       0 -> { tapGapMs = 120L; tapHoldMs = 40L; settleMs = 80L; loopMs = 25L }
@@ -798,7 +802,7 @@ jobs:
                       }
                   }, handler)
 
-                  val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+                  val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
                   reader = r
                   virtualDisplay = proj.createVirtualDisplay(
                       "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
@@ -824,7 +828,7 @@ jobs:
                   val h = screenH / SCALE
                   try {
                       val old = reader
-                      val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+                      val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
                       val vd = virtualDisplay
                       if (vd != null) {
                           vd.resize(w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE))
@@ -966,7 +970,7 @@ jobs:
                               if (y + 1 < h && label[idx + w].toInt() == c && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
                               if (y > 0 && label[idx - w].toInt() == c && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
                           }
-                          if (n < 30 || minY <= top) continue
+                          if (n < 16 || minY <= top) continue
                           val bwid = maxX - minX + 1; val bhei = maxY - minY + 1
                           val fill = n.toFloat() / (bwid * bhei)
                           val aspect = bwid.toFloat() / bhei
@@ -1135,7 +1139,7 @@ jobs:
                   // vertical slice of the screen and its own timeline; gestures stay small (at most a
                   // handful of strokes) so the input system is never flooded.
                   val density = resources.displayMetrics.density
-                  val want = if (human) 2 else 3   // machine trimmed from 4: four was overloading the phone
+                  val want = if (human) fingersHuman else fingersMachine
                   val fingers = maxOf(1, minOf(want, TapService.maxSafeFingers()))
                   val ordered = hits.sortedBy { it.x }
                   val n = ordered.size
@@ -1483,6 +1487,8 @@ jobs:
               private lateinit var gapInput: EditText
               private lateinit var maxTaps: EditText
               private lateinit var skipTop: EditText
+              private lateinit var fingersHuman: EditText
+              private lateinit var fingersMachine: EditText
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -1510,6 +1516,14 @@ jobs:
                   maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 6).toString()) }
                   root.addView(maxTaps)
 
+                  root.addView(label("Fingers in normal play (1 = one thumb, steadiest)"))
+                  fingersHuman = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersHuman", 1).toString()) }
+                  root.addView(fingersHuman)
+
+                  root.addView(label("Fingers in machine / turbo mode (more = faster, heavier on the phone)"))
+                  fingersMachine = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersMachine", 2).toString()) }
+                  root.addView(fingersMachine)
+
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
                   skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 8).toString()) }
                   root.addView(skipTop)
@@ -1520,7 +1534,7 @@ jobs:
                   root.addView(button("2. Turn on tap service (Accessibility)") {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
-                  fxCheck = CheckBox(this).apply { text = "Live detection view (rings + tap bursts)"; isChecked = prefs.getBoolean("fx", true) }
+                  fxCheck = CheckBox(this).apply { text = "Live detection view (rings + tap bursts) \u2014 costs battery"; isChecked = prefs.getBoolean("fx", false) }
                   root.addView(fxCheck)
 
                   root.addView(label("Play style"))
@@ -1600,6 +1614,8 @@ jobs:
                   ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 3))
                   ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 30) ?: 6)
                       .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
+                      .putInt("fingersHuman", fingersHuman.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 1)
+                      .putInt("fingersMachine", fingersMachine.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 2)
                       .apply()
 
                   if (!Settings.canDrawOverlays(this)) { toast("Do step 1 first"); return }
