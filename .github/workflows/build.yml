@@ -1,45 +1,76 @@
-name: Build Balloon Tapper APK
+name: Build Balloon Tapper Test Simulator
+
 on:
   workflow_dispatch:
   push:
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
+
       - name: Create project files
+        shell: bash
         run: |
-          cat > settings.gradle.kts <<'ENDOFFILE'
-          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          set -e
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
           rootProject.name = "BalloonTapper"
           include(":app")
-          ENDOFFILE
-          cat > build.gradle.kts <<'ENDOFFILE'
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
-          ENDOFFILE
-          cat > gradle.properties <<'ENDOFFILE'
+          EOF
+
+          cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2048m
           android.useAndroidX=true
-          ENDOFFILE
-          mkdir -p app
-          cat > app/build.gradle.kts <<'ENDOFFILE'
+          EOF
+
+          mkdir -p app/src/main/java/com/example/balloontapper
+          mkdir -p app/src/main/res/values
+
+          cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
           }
+
           android {
               namespace = "com.example.balloontapper"
               compileSdk = 34
+
               defaultConfig {
                   applicationId = "com.example.balloontapper"
                   minSdk = 26
@@ -47,796 +78,635 @@ jobs:
                   versionCode = 1
                   versionName = "1.0"
               }
+
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
               }
-              kotlinOptions { jvmTarget = "17" }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
           }
-          ENDOFFILE
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml <<'ENDOFFILE'
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
-                  android:label="Balloon Tapper"
-                  android:icon="@android:drawable/ic_menu_compass"
-                  android:theme="@android:style/Theme.Material.Light">
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:label="Balloon Tapper Simulator"
+                  android:allowBackup="false"
+                  android:supportsRtl="true">
 
-                  <activity android:name=".MainActivity" android:exported="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
+
                   </activity>
 
-                  <service
-                      android:name=".CaptureService"
-                      android:exported="false"
-                      android:foregroundServiceType="mediaProjection" />
-
-                  <service
-                      android:name=".TapService"
-                      android:exported="false"
-                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-                      <intent-filter>
-                          <action android:name="android.accessibilityservice.AccessibilityService" />
-                      </intent-filter>
-                      <meta-data
-                          android:name="android.accessibilityservice"
-                          android:resource="@xml/tap_service" />
-                  </service>
               </application>
+
           </manifest>
-          ENDOFFILE
-          mkdir -p app/src/main/res/values
-          cat > app/src/main/res/values/strings.xml <<'ENDOFFILE'
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
           <resources>
-              <string name="acc_desc">Lets Balloon Tapper tap on screen where your chosen colours appear.</string>
+              <string name="app_name">Balloon Tapper Simulator</string>
           </resources>
-          ENDOFFILE
-          mkdir -p app/src/main/res/xml
-          cat > app/src/main/res/xml/tap_service.xml <<'ENDOFFILE'
-          <?xml version="1.0" encoding="utf-8"?>
-          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-              android:description="@string/acc_desc"
-              android:accessibilityEventTypes="typeWindowStateChanged"
-              android:accessibilityFeedbackType="feedbackGeneric"
-              android:notificationTimeout="100"
-              android:canPerformGestures="true" />
-          ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
-          cat > app/src/main/java/com/example/balloontapper/TapService.kt <<'ENDOFFILE'
-          package com.example.balloontapper
+          EOF
 
-          import android.accessibilityservice.AccessibilityService
-          import android.accessibilityservice.GestureDescription
-          import android.content.Intent
-          import android.graphics.Path
-          import android.graphics.PointF
-          import android.view.accessibility.AccessibilityEvent
-
-          /** Performs the actual taps. Must be enabled in Settings > Accessibility. */
-          class TapService : AccessibilityService() {
-
-              companion object {
-                  @Volatile var instance: TapService? = null
-              }
-
-              override fun onServiceConnected() { instance = this }
-              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-              override fun onInterrupt() {}
-
-              override fun onUnbind(intent: Intent?): Boolean {
-                  instance = null
-                  return super.onUnbind(intent)
-              }
-
-              /** Taps points four at a time (like four fingers), groups spaced by gapMs, then calls done(). */
-              fun tapMany(points: List<PointF>, gapMs: Long, holdMs: Long, done: () -> Unit) {
-                  val fingers = 4
-                  val maxStrokes = GestureDescription.getMaxStrokeCount()
-                  val batch = if (maxStrokes >= fingers) maxStrokes - maxStrokes % fingers else maxOf(1, maxStrokes)
-                  val perGroup = minOf(fingers, batch)
-                  val chunks = points.chunked(batch)
-                  fun send(i: Int) {
-                      if (i >= chunks.size) { done(); return }
-                      val ok = try {
-                          val builder = GestureDescription.Builder()
-                          chunks[i].forEachIndexed { k, pt ->
-                              val path = Path().apply { moveTo(maxOf(0f, pt.x), maxOf(0f, pt.y)) }
-                              val groupStart = (k / perGroup) * gapMs   // all taps in a group of four start together
-                              builder.addStroke(GestureDescription.StrokeDescription(path, groupStart, holdMs))
-                          }
-                          dispatchGesture(builder.build(), object : GestureResultCallback() {
-                              override fun onCompleted(g: GestureDescription?) = send(i + 1)
-                              override fun onCancelled(g: GestureDescription?) = send(i + 1)
-                          }, null)
-                      } catch (e: Exception) {
-                          android.util.Log.e("BalloonTapper", "tap error", e)
-                          false
-                      }
-                      if (!ok) done()
-                  }
-                  if (chunks.isEmpty()) done() else send(0)
-              }
-          }
-          ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
-          cat > app/src/main/java/com/example/balloontapper/CaptureService.kt <<'ENDOFFILE'
-          package com.example.balloontapper
-
-          import android.annotation.SuppressLint
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.Service
-          import android.content.Intent
-          import android.content.pm.ServiceInfo
-          import android.graphics.Color
-          import android.graphics.PixelFormat
-          import android.graphics.Point
-          import android.graphics.PointF
-          import android.hardware.display.DisplayManager
-          import android.hardware.display.VirtualDisplay
-          import android.media.ImageReader
-          import android.media.projection.MediaProjection
-          import android.media.projection.MediaProjectionManager
-          import android.os.*
-          import android.util.Log
-          import android.view.Gravity
-          import android.view.MotionEvent
-          import android.view.WindowManager
-          import android.widget.TextView
-          import kotlin.math.abs
-          import kotlin.math.cos
-          import kotlin.math.hypot
-          import kotlin.math.sin
-          import kotlin.math.sqrt
-
-          /** Watches the screen, finds balloons and taps them. Built to keep running no matter what. */
-          class CaptureService : Service() {
-
-              companion object {
-                  private const val TAG = "BalloonTapper"
-                  // colour, hueMin, hueMax, satMin, satMax, valMin (tuned on Google Store Playground screenshots)
-                  private val RULES = arrayOf(
-                      floatArrayOf(0f, 203f, 222f, 0.45f, 1.00f, 0.55f),
-                      floatArrayOf(1f, 0f, 14f, 0.60f, 1.00f, 0.75f),
-                      floatArrayOf(1f, 355f, 360f, 0.60f, 1.00f, 0.75f),
-                      floatArrayOf(2f, 44f, 64f, 0.30f, 1.00f, 0.65f),
-                      floatArrayOf(3f, 128f, 154f, 0.35f, 0.74f, 0.62f)
-                  )
-                  private val RING_HUE = floatArrayOf(213f, 3f, 51f, 133f)
-                  private const val SCALE = 4
-              }
-
-              // capture
-              private var projection: MediaProjection? = null
-              private var virtualDisplay: VirtualDisplay? = null
-              private var reader: ImageReader? = null
-              private lateinit var thread: HandlerThread
-              private lateinit var handler: Handler
-              private lateinit var wm: WindowManager
-              private val mainHandler = Handler(Looper.getMainLooper())
-              private var screenW = 0
-              private var screenH = 0
-
-              // overlay
-              private var overlay: TextView? = null
-              private var overlayParams: WindowManager.LayoutParams? = null
-              @Volatile private var captureLost = false
-
-              // state
-              @Volatile private var running = false
-              @Volatile private var busy = false
-              @Volatile private var busySince = 0L
-              @Volatile private var nextScanAt = 0L
-              private var loopStarted = false
-
-              // reusable buffers (no garbage per frame = no stutter)
-              private var bw = 0
-              private var bh = 0
-              private var label = ByteArray(0)
-              private var hue = FloatArray(0)
-              private var sat = FloatArray(0)
-              private var seen = BooleanArray(0)
-              private var stack = IntArray(0)
-              private var members = IntArray(0)
-              private val hs = FloatArray(2)
-
-              // tap memory, aiming and special order
-              private val startedAt = SystemClock.uptimeMillis()
-              private val recentTaps = ArrayList<FloatArray>()     // x, y, time
-              private var prevBlobs = ArrayList<FloatArray>()      // x, y
-              private var prevFrameAt = 0L
-              private val tapCooldownMs = 300f
-              private val leadMs = 60f
-              private var nextSpecial = 0
-              private var frenzyUntil = 0L                         // rush mode when the screen floods with balloons
-              private var specialLastSeen = 0L
-              private var pendingSpecial: FloatArray? = null       // x, y, colour, time
-
-              // settings
-              private var enabledColours = booleanArrayOf(true, true, true, true)
-              private var maxTaps = 16
-              private var skipTopPct = 8
-              private var tapGapMs = 6L
-              private var tapHoldMs = 6L
-              private var settleMs = 30L
-              private var loopMs = 12L
-
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  startAsForeground()
-                  if (!::thread.isInitialized) {
-                      thread = HandlerThread("scanner", android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
-                      handler = Handler(thread.looper)
-                      wm = getSystemService(WindowManager::class.java)
-                  }
-                  loadSettings()
-                  if (overlay == null) showOverlay()
-
-                  val code = intent?.getIntExtra("code", 0) ?: 0
-                  val data: Intent? = if (Build.VERSION.SDK_INT >= 33)
-                      intent?.getParcelableExtra("data", Intent::class.java)
-                  else @Suppress("DEPRECATION") intent?.getParcelableExtra("data")
-
-                  if (data != null) {
-                      releaseCapture()
-                      try {
-                          startCapture(code, data)
-                          captureLost = false
-                          setButton()
-                      } catch (t: Throwable) {
-                          Log.e(TAG, "capture start failed", t)
-                          captureLost = true
-                          setButton()
-                      }
-                  }
-                  if (!loopStarted) { loopStarted = true; handler.post(loop) }
-                  return START_NOT_STICKY
-              }
-
-              private fun startAsForeground() {
-                  val nm = getSystemService(NotificationManager::class.java)
-                  nm.createNotificationChannel(NotificationChannel("tapper", "Balloon Tapper", NotificationManager.IMPORTANCE_LOW))
-                  val n = Notification.Builder(this, "tapper")
-                      .setContentTitle("Balloon Tapper is running")
-                      .setContentText("Long-press the floating button to quit")
-                      .setSmallIcon(android.R.drawable.ic_media_play)
-                      .setOngoing(true)
-                      .build()
-                  try {
-                      if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-                      else startForeground(1, n)
-                  } catch (t: Throwable) {
-                      Log.e(TAG, "foreground failed", t)
-                  }
-              }
-
-              private fun loadSettings() {
-                  val p = getSharedPreferences("cfg", MODE_PRIVATE)
-                  enabledColours = booleanArrayOf(
-                      p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
-                  )
-                  maxTaps = p.getInt("maxTaps", 16)
-                  skipTopPct = p.getInt("skipTop", 8)
-                  // taps go out four at a time (four fingers); tapGapMs = pause between groups
-                  when (p.getInt("speed", 1)) {
-                      0 -> { tapGapMs = 60L; tapHoldMs = 25L; settleMs = 70L; loopMs = 25L }
-                      1 -> { tapGapMs = 35L; tapHoldMs = 20L; settleMs = 45L; loopMs = 18L }
-                      else -> { tapGapMs = 20L; tapHoldMs = 15L; settleMs = 30L; loopMs = 12L }
-                  }
-              }
-
-              private fun startCapture(code: Int, data: Intent) {
-                  val size = Point()
-                  if (Build.VERSION.SDK_INT >= 30) {
-                      val b = wm.maximumWindowMetrics.bounds
-                      size.set(b.width(), b.height())
-                  } else @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(size)
-                  screenW = size.x
-                  screenH = size.y
-
-                  val w = screenW / SCALE
-                  val h = screenH / SCALE
-                  val mpm = getSystemService(MediaProjectionManager::class.java)
-                  val proj = mpm.getMediaProjection(code, data)
-                  projection = proj
-                  proj.registerCallback(object : MediaProjection.Callback() {
-                      override fun onStop() {
-                          // Android stopped screen capture (screen locked, call, etc.). Keep the app alive and ask to resume.
-                          Log.w(TAG, "projection stopped")
-                          captureLost = true
-                          releaseCapture()
-                          setButton()
-                      }
-                  }, handler)
-
-                  val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
-                  reader = r
-                  virtualDisplay = proj.createVirtualDisplay(
-                      "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
-                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler
-                  )
-              }
-
-              private fun releaseCapture() {
-                  try { virtualDisplay?.release() } catch (_: Throwable) {}
-                  try { reader?.close() } catch (_: Throwable) {}
-                  val p = projection
-                  projection = null
-                  virtualDisplay = null
-                  reader = null
-                  try { p?.stop() } catch (_: Throwable) {}
-              }
-
-              /** The main loop. Whatever happens inside, it always schedules itself again. */
-              private val loop = object : Runnable {
-                  override fun run() {
-                      try {
-                          val now = SystemClock.uptimeMillis()
-                          // watchdog: if a tap batch never reported back, don't stay stuck
-                          if (busy && now - busySince > 1200) busy = false
-                          if (running && !busy && now >= nextScanAt && reader != null) scanAndTap()
-                          else reader?.acquireLatestImage()?.close()
-                      } catch (t: Throwable) {
-                          busy = false
-                          Log.e(TAG, "loop error", t)
-                      } finally {
-                          handler.postDelayed(this, loopMs)
-                      }
-                  }
-              }
-
-              private fun ensureBuffers(w: Int, h: Int) {
-                  if (w == bw && h == bh) return
-                  bw = w; bh = h
-                  val n = w * h
-                  label = ByteArray(n); hue = FloatArray(n); sat = FloatArray(n)
-                  seen = BooleanArray(n); stack = IntArray(n); members = IntArray(n)
-              }
-
-              private fun colourMatch(r: Int, g: Int, b: Int): Int {
-                  val mx = maxOf(r, maxOf(g, b)); val mn = minOf(r, minOf(g, b)); val d = mx - mn
-                  if (mx == 0 || d == 0) { hs[0] = 0f; hs[1] = 0f; return -1 }
-                  val s = d.toFloat() / mx
-                  var h = when (mx) {
-                      r -> 60f * (g - b) / d
-                      g -> 60f * (b - r) / d + 120f
-                      else -> 60f * (r - g) / d + 240f
-                  }
-                  if (h < 0) h += 360f
-                  hs[0] = h; hs[1] = s
-                  val v = mx / 255f
-                  for (rule in RULES) {
-                      if (h >= rule[1] && h <= rule[2] && s >= rule[3] && s <= rule[4] && v >= rule[5]) return rule[0].toInt()
-                  }
-                  return -1
-              }
-
-              private fun hueDiff(a: Float, b: Float): Float {
-                  val d = abs(a - b) % 360f
-                  return minOf(d, 360f - d)
-              }
-
-              private fun scanAndTap() {
-                  val img = reader?.acquireLatestImage() ?: return
-                  val now = SystemClock.uptimeMillis()
-                  val nowRel = (now - startedAt).toFloat()
-                  val hits = ArrayList<PointF>()
-                  try {
-                      val plane = img.planes[0]
-                      val buf = plane.buffer
-                      val rowStride = plane.rowStride
-                      val px = plane.pixelStride
-                      val w = img.width
-                      val h = img.height
-                      val limit = buf.limit()
-                      ensureBuffers(w, h)
-                      val sx = screenW.toFloat() / w
-                      val sy = screenH.toFloat() / h
-                      val top = h * skipTopPct / 100
-
-                      // 1. colour label for every pixel
-                      for (y in 0 until h) {
-                          val row = y * rowStride
-                          for (x in 0 until w) {
-                              val i = row + x * px
-                              val k = y * w + x
-                              if (i + 2 >= limit) { label[k] = (-1).toByte(); hue[k] = 0f; sat[k] = 0f; continue }
-                              val c = colourMatch(buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff)
-                              hue[k] = hs[0]; sat[k] = hs[1]
-                              label[k] = if (y >= top) c.toByte() else (-1).toByte()
-                          }
-                      }
-                      java.util.Arrays.fill(seen, false)
-
-                      // 2. blobs
-                      val normal = ArrayList<FloatArray>()     // cx, cy, size, colour (scaled px)
-                      val specials = ArrayList<FloatArray>()
-                      val total = w * h
-                      for (start in 0 until total) {
-                          val c = label[start].toInt()
-                          if (c < 0 || seen[start]) continue
-                          var sp = 0; stack[sp++] = start; seen[start] = true
-                          var n = 0; var sumX = 0L; var sumY = 0L
-                          var minX = w; var maxX = 0; var minY = h; var maxY = 0
-                          while (sp > 0) {
-                              val idx = stack[--sp]; val x = idx % w; val y = idx / w
-                              members[n++] = idx; sumX += x; sumY += y
-                              if (x < minX) minX = x
-                              if (x > maxX) maxX = x
-                              if (y < minY) minY = y
-                              if (y > maxY) maxY = y
-                              if (x + 1 < w && label[idx + 1].toInt() == c && !seen[idx + 1]) { seen[idx + 1] = true; stack[sp++] = idx + 1 }
-                              if (x > 0 && label[idx - 1].toInt() == c && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
-                              if (y + 1 < h && label[idx + w].toInt() == c && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
-                              if (y > 0 && label[idx - w].toInt() == c && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
-                          }
-                          if (n < 30 || minY <= top) continue
-                          val bwid = maxX - minX + 1; val bhei = maxY - minY + 1
-                          val fill = n.toFloat() / (bwid * bhei)
-                          val aspect = bwid.toFloat() / bhei
-                          val big = maxOf(bwid, bhei)
-                          val cx = sumX.toFloat() / n; val cy = sumY.toFloat() / n
-
-                          if (big <= 75 && aspect in 0.6f..1.66f && fill >= 0.5f) {
-                              // single balloon
-                              val blob = floatArrayOf(cx, cy, n.toFloat(), c.toFloat())
-                              if (ringScore(cx, cy, (bwid + bhei) / 4f, c, w, h) >= 0.45f) specials.add(blob) else normal.add(blob)
-                          } else if (fill >= 0.30f) {
-                              // crowd of touching balloons: tap the middle of each filled grid cell
-                              val cell = 18
-                              val cols = bwid / cell + 1; val rows = bhei / cell + 1
-                              val cnt = IntArray(cols * rows); val gx = LongArray(cols * rows); val gy = LongArray(cols * rows)
-                              for (m in 0 until n) {
-                                  val idx = members[m]; val x = idx % w; val y = idx / w
-                                  val g = ((y - minY) / cell) * cols + (x - minX) / cell
-                                  cnt[g]++; gx[g] += x.toLong(); gy[g] += y.toLong()
-                              }
-                              for (g in 0 until cols * rows) {
-                                  if (cnt[g] >= cell * cell * 0.40f)
-                                      normal.add(floatArrayOf(gx[g].toFloat() / cnt[g], gy[g].toFloat() / cnt[g], cnt[g].toFloat(), c.toFloat()))
-                              }
-                          }
-                      }
-
-                      // 3. aiming helpers
-                      val dt = (now - prevFrameAt).coerceAtLeast(1L).toFloat()
-                      recentTaps.removeAll { nowRel - it[2] > tapCooldownMs }
-                      val current = ArrayList<FloatArray>(normal.size + specials.size)
-                      for (bl in normal) current.add(floatArrayOf((bl[0] + 0.5f) * sx, (bl[1] + 0.5f) * sy))
-                      for (bl in specials) current.add(floatArrayOf((bl[0] + 0.5f) * sx, (bl[1] + 0.5f) * sy))
-                      fun aim(bl: FloatArray): PointF {
-                          val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          var tx = bx; var ty = by
-                          if (dt < 250f && prevBlobs.isNotEmpty()) {
-                              var best: FloatArray? = null; var bestD = 120f
-                              for (pb in prevBlobs) { val d = hypot(pb[0] - bx, pb[1] - by); if (d < bestD) { bestD = d; best = pb } }
-                              if (best != null) {
-                                  val ahead = leadMs + (hits.size / 4) * tapGapMs
-                                  tx += ((bx - best[0]) / dt).coerceIn(-1.5f, 1.5f) * ahead
-                                  ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
-                              }
-                          }
-                          return PointF(tx.coerceIn(1f, screenW - 2f), ty.coerceIn(1f, screenH - 2f))
-                      }
-
-                      // 4. special ringed balloons: blue -> red -> yellow -> green
-                      if (specials.isNotEmpty()) specialLastSeen = now
-                      else if (now - specialLastSeen > 3000) { nextSpecial = 0; pendingSpecial = null }
-                      val pend = pendingSpecial
-                      if (pend != null && nowRel - pend[3] > 150f) {
-                          val still = specials.any {
-                              it[3].toInt() == pend[2].toInt() && hypot((it[0] + 0.5f) * sx - pend[0], (it[1] + 0.5f) * sy - pend[1]) < 140f
-                          }
-                          pendingSpecial = null
-                          if (!still) nextSpecial = (pend[2].toInt() + 1) % 4
-                      }
-                      if (pendingSpecial == null) {
-                          val target = specials.filter { it[3].toInt() == nextSpecial }.maxByOrNull { it[2] }
-                          if (target != null) {
-                              val p = aim(target)
-                              if (!onOverlay(p.x, p.y)) {
-                                  hits.add(p)
-                                  pendingSpecial = floatArrayOf(p.x, p.y, nextSpecial.toFloat(), nowRel)
-                              }
-                          }
-                      }
-
-                      // 5. normal balloons. When the screen floods, switch to rush mode for a moment.
-                      if (normal.size >= 12) frenzyUntil = now + 1500
-                      val frenzy = now < frenzyUntil
-                      val tapLimit = if (frenzy) maxOf(maxTaps * 3, 48) else maxTaps
-                      val minGuard = if (frenzy) 32f else 50f
-                      recentTaps.removeAll { nowRel - it[2] > (if (frenzy) 180f else tapCooldownMs) }
-                      // balloons closest to escaping off the top go first, then bigger ones
-                      normal.sortWith(compareBy<FloatArray> { it[1] }.thenByDescending { it[2] })
-                      for (bl in normal) {
-                          if (hits.size >= tapLimit) break
-                          if (!enabledColours[bl[3].toInt()]) continue
-                          val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          val guard = maxOf(sqrt(bl[2] / 3.14f) * sx * 0.7f, minGuard)
-                          var blocked = false
-                          for (t in recentTaps) if (hypot(t[0] - bx, t[1] - by) < guard) { blocked = true; break }
-                          if (blocked) continue
-                          val p = aim(bl)
-                          if (onOverlay(p.x, p.y)) continue
-                          hits.add(p)
-                          recentTaps.add(floatArrayOf(bx, by, nowRel))
-                      }
-                      prevBlobs = current
-                      prevFrameAt = now
-                  } finally {
-                      try { img.close() } catch (_: Throwable) {}
-                  }
-
-                  if (hits.isEmpty()) return
-                  val tapper = TapService.instance
-                  if (tapper == null) {
-                      mainHandler.post { overlay?.text = "TURN ON TAP SERVICE" }
-                      return
-                  }
-                  busy = true
-                  busySince = SystemClock.uptimeMillis()
-                  val rush = SystemClock.uptimeMillis() < frenzyUntil
-                  val gap = if (rush) minOf(tapGapMs, 16L) else tapGapMs
-                  val hold = if (rush) minOf(tapHoldMs, 12L) else tapHoldMs
-                  val settle = if (rush) minOf(settleMs, 20L) else settleMs
-                  tapper.tapMany(hits, gap, hold) {
-                      nextScanAt = SystemClock.uptimeMillis() + settle
-                      busy = false
-                  }
-              }
-
-              /** How much of a thin same-colour ring surrounds this balloon (0..1). */
-              private fun ringScore(cx: Float, cy: Float, r: Float, c: Int, w: Int, h: Int): Float {
-                  var best = 0f
-                  var k = 24
-                  while (k <= 45) {
-                      val rad = r * k / 20f
-                      var hit = 0; var tot = 0
-                      for (a in 0 until 40) {
-                          val t = a * (Math.PI.toFloat() * 2f / 40f)
-                          val cs = cos(t); val sn = sin(t)
-                          val xi = (cx + cs * (rad - 3)).toInt(); val yi = (cy + sn * (rad - 3)).toInt()
-                          val xo = (cx + cs * (rad + 3)).toInt(); val yo = (cy + sn * (rad + 3)).toInt()
-                          if (xi !in 0 until w || xo !in 0 until w || yi !in 0 until h || yo !in 0 until h) continue
-                          tot++
-                          val sIn = sat[yi * w + xi]; val sOut = sat[yo * w + xo]
-                          for (dr in -1..1) {
-                              val x = (cx + cs * (rad + dr)).toInt(); val y = (cy + sn * (rad + dr)).toInt()
-                              if (x !in 0 until w || y !in 0 until h) continue
-                              val q = y * w + x
-                              if (hueDiff(hue[q], RING_HUE[c]) <= 14f && sat[q] >= 0.2f && sat[q] > sIn + 0.08f && sat[q] > sOut + 0.08f) { hit++; break }
-                          }
-                      }
-                      if (tot >= 20) best = maxOf(best, hit.toFloat() / tot)
-                      k += 1
-                  }
-                  return best
-              }
-
-              private fun onOverlay(x: Float, y: Float): Boolean {
-                  val p = overlayParams ?: return false
-                  val v = overlay ?: return false
-                  val pad = 40
-                  return x >= p.x - pad && x <= p.x + v.width + pad && y >= p.y - pad && y <= p.y + v.height + pad
-              }
-
-              private fun setButton() {
-                  mainHandler.post {
-                      overlay?.text = when {
-                          captureLost -> "RESUME"
-                          running -> "STOP"
-                          else -> "START"
-                      }
-                  }
-              }
-
-              @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
-              private fun showOverlay() {
-                  val tv = TextView(this).apply {
-                      text = "START"
-                      textSize = 16f
-                      setTextColor(Color.WHITE)
-                      setBackgroundColor(Color.argb(200, 30, 30, 30))
-                      setPadding(36, 24, 36, 24)
-                  }
-                  val params = WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
-                      PixelFormat.TRANSLUCENT
-                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 300 }
-
-                  var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
-                  var downTime = 0L; var moved = false
-                  tv.setOnTouchListener { _, e ->
-                      when (e.action) {
-                          MotionEvent.ACTION_DOWN -> {
-                              downX = e.rawX; downY = e.rawY; startX = params.x; startY = params.y
-                              downTime = SystemClock.uptimeMillis(); moved = false
-                          }
-                          MotionEvent.ACTION_MOVE -> {
-                              val dx = e.rawX - downX; val dy = e.rawY - downY
-                              if (abs(dx) > 15 || abs(dy) > 15) moved = true
-                              if (moved) {
-                                  params.x = startX + dx.toInt(); params.y = startY + dy.toInt()
-                                  try { wm.updateViewLayout(tv, params) } catch (_: Throwable) {}
-                              }
-                          }
-                          MotionEvent.ACTION_UP -> if (!moved) {
-                              when {
-                                  SystemClock.uptimeMillis() - downTime > 800 -> stopSelf()   // long-press = quit
-                                  captureLost -> {
-                                      // screen capture was stopped by Android: ask for it again, then carry on
-                                      running = true
-                                      startActivity(Intent(this, MainActivity::class.java)
-                                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                                          .putExtra("resume", true))
-                                  }
-                                  else -> {
-                                      running = !running
-                                      busy = false
-                                      setButton()
-                                  }
-                              }
-                          }
-                      }
-                      true
-                  }
-                  try { wm.addView(tv, params) } catch (t: Throwable) { Log.e(TAG, "overlay failed", t) }
-                  overlay = tv
-                  overlayParams = params
-              }
-
-              override fun onDestroy() {
-                  running = false
-                  overlay?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
-                  overlay = null
-                  releaseCapture()
-                  if (::thread.isInitialized) { handler.removeCallbacksAndMessages(null); thread.quitSafely() }
-                  super.onDestroy()
-              }
-          }
-          ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
-          cat > app/src/main/java/com/example/balloontapper/MainActivity.kt <<'ENDOFFILE'
+          cat > app/src/main/java/com/example/balloontapper/MainActivity.kt <<'EOF'
           package com.example.balloontapper
 
           import android.app.Activity
-          import android.content.Intent
-          import android.media.projection.MediaProjectionManager
-          import android.net.Uri
-          import android.os.Build
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.PointF
           import android.os.Bundle
-          import android.provider.Settings
-          import android.text.InputType
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.MotionEvent
           import android.view.View
-          import android.widget.*
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import kotlin.math.cos
+          import kotlin.math.sin
+          import kotlin.random.Random
 
           class MainActivity : Activity() {
 
+              private lateinit var simulator: SimulatorView
+
+              private lateinit var minDelay: EditText
+              private lateinit var maxDelay: EditText
+              private lateinit var jitter: EditText
+              private lateinit var pauseChance: EditText
+              private lateinit var minPause: EditText
+              private lateinit var maxPause: EditText
+              private lateinit var minHold: EditText
+              private lateinit var maxHold: EditText
+
               private lateinit var status: TextView
-              private var checks: List<CheckBox> = emptyList()
-              private lateinit var speedGroup: RadioGroup
-              private lateinit var maxTaps: EditText
-              private lateinit var skipTop: EditText
+
+              private val prefs by lazy {
+                  getSharedPreferences("simulator", MODE_PRIVATE)
+              }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-                  val pad = (16 * resources.displayMetrics.density).toInt()
+
+                  val density = resources.displayMetrics.density
+                  val pad = (16 * density).toInt()
 
                   val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(pad, pad * 2, pad, pad)
-                  }
-                  fun label(t: String) = TextView(this).apply { text = t; setPadding(0, pad, 0, 0) }
-                  fun button(t: String, onClick: (View) -> Unit) =
-                      Button(this).apply { text = t; setOnClickListener(onClick) }
-
-                  status = TextView(this).apply { textSize = 15f }
-                  root.addView(status)
-
-                  root.addView(label("Balloon colours to pop (grey balloons are always skipped)"))
-                  val colourNames = listOf("blue" to "Blue", "red" to "Red", "yellow" to "Yellow", "green" to "Green")
-                  checks = colourNames.map { (key, name) ->
-                      CheckBox(this).apply { text = name; isChecked = prefs.getBoolean(key, true); tag = key }.also { root.addView(it) }
+                      setPadding(pad, pad, pad, pad)
                   }
 
-                  root.addView(label("Max taps per scan"))
-                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 16).toString()) }
-                  root.addView(maxTaps)
+                  val scroll = ScrollView(this)
 
-                  root.addView(label("Ignore top % of screen (score bar etc.)"))
-                  skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 8).toString()) }
-                  root.addView(skipTop)
-
-                  root.addView(button("1. Allow floating button") {
-                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-                  })
-                  root.addView(button("2. Turn on tap service (Accessibility)") {
-                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                  })
-                  root.addView(label("Tap speed"))
-                  val speedNames = listOf("Relaxed (4 taps every 60 ms)", "Normal (4 taps every 35 ms)", "Quick (4 taps every 20 ms)")
-                  speedGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-                  speedNames.forEachIndexed { i, name ->
-                      speedGroup.addView(RadioButton(this).apply { text = name; id = 100 + i })
+                  val content = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
                   }
-                  speedGroup.check(100 + prefs.getInt("speed", 1))
-                  root.addView(speedGroup)
 
-                  root.addView(button("3. Stop battery saver killing the app") {
-                      val pm = getSystemService(android.os.PowerManager::class.java)
-                      if (pm.isIgnoringBatteryOptimizations(packageName)) toast("Already allowed")
-                      else startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-                  })
-                  root.addView(button("4. Save & launch overlay") { launch() })
+                  fun title(text: String): TextView {
+                      return TextView(this).apply {
+                          this.text = text
+                          textSize = 20f
+                          setTextColor(Color.BLACK)
+                          setPadding(0, pad / 2, 0, pad / 2)
+                      }
+                  }
 
-                  setContentView(ScrollView(this).apply { addView(root) })
-                  if (intent?.getBooleanExtra("resume", false) == true) root.post { launch() }
+                  fun label(text: String): TextView {
+                      return TextView(this).apply {
+                          this.text = text
+                          textSize = 14f
+                          setPadding(0, pad / 2, 0, 4)
+                      }
+                  }
+
+                  fun input(
+                      labelText: String,
+                      key: String,
+                      default: Int
+                  ): EditText {
+
+                      content.addView(label(labelText))
+
+                      return EditText(this).apply {
+                          inputType =
+                              android.text.InputType.TYPE_CLASS_NUMBER or
+                              android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+
+                          setText(
+                              prefs.getInt(key, default).toString()
+                          )
+
+                          content.addView(this)
+                      }
+                  }
+
+                  content.addView(title("Balloon Tapper Test Simulator"))
+
+                  content.addView(
+                      TextView(this).apply {
+                          text =
+                              "This screen simulates input timing locally. " +
+                              "It does not send randomized input to another app."
+                          textSize = 14f
+                          setPadding(0, 0, 0, pad)
+                      }
+                  )
+
+                  val naturalMode = CheckBox(this).apply {
+                      text = "Human-like timing mode"
+                      isChecked = prefs.getBoolean("natural", true)
+                  }
+
+                  content.addView(naturalMode)
+
+                  minDelay = input(
+                      "Minimum delay between simulated taps (ms)",
+                      "minDelay",
+                      60
+                  )
+
+                  maxDelay = input(
+                      "Maximum delay between simulated taps (ms)",
+                      "maxDelay",
+                      140
+                  )
+
+                  jitter = input(
+                      "Position jitter radius (px)",
+                      "jitter",
+                      8
+                  )
+
+                  pauseChance = input(
+                      "Occasional pause probability (%)",
+                      "pauseChance",
+                      8
+                  )
+
+                  minPause = input(
+                      "Minimum occasional pause (ms)",
+                      "minPause",
+                      300
+                  )
+
+                  maxPause = input(
+                      "Maximum occasional pause (ms)",
+                      "maxPause",
+                      900
+                  )
+
+                  minHold = input(
+                      "Minimum simulated hold duration (ms)",
+                      "minHold",
+                      35
+                  )
+
+                  maxHold = input(
+                      "Maximum simulated hold duration (ms)",
+                      "maxHold",
+                      80
+                  )
+
+                  status = TextView(this).apply {
+                      textSize = 15f
+                      setPadding(0, pad, 0, pad)
+                  }
+
+                  content.addView(status)
+
+                  val save = Button(this).apply {
+                      text = "Save settings"
+                      setOnClickListener {
+                          saveSettings(naturalMode.isChecked)
+                      }
+                  }
+
+                  content.addView(save)
+
+                  val start = Button(this).apply {
+                      text = "Start local simulation"
+                      setOnClickListener {
+                          saveSettings(naturalMode.isChecked)
+                          simulator.startSimulation()
+                      }
+                  }
+
+                  content.addView(start)
+
+                  val stop = Button(this).apply {
+                      text = "Stop simulation"
+                      setOnClickListener {
+                          simulator.stopSimulation()
+                      }
+                  }
+
+                  content.addView(stop)
+
+                  simulator = SimulatorView()
+
+                  content.addView(
+                      simulator,
+                      LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          (360 * density).toInt()
+                      )
+                  )
+
+                  scroll.addView(content)
+                  root.addView(scroll)
+
+                  setContentView(root)
+
+                  updateStatus()
               }
 
-              override fun onNewIntent(intent: Intent) {
-                  super.onNewIntent(intent)
-                  if (intent.getBooleanExtra("resume", false)) launch()
+              private fun number(
+                  field: EditText,
+                  fallback: Int
+              ): Int {
+                  return field.text
+                      .toString()
+                      .toIntOrNull()
+                      ?: fallback
               }
 
-              override fun onResume() {
-                  super.onResume()
-                  val overlayOk = Settings.canDrawOverlays(this)
-                  val tapOk = TapService.instance != null
-                  status.text = "Floating button permission: ${if (overlayOk) "OK" else "NO"}\n" +
-                          "Tap service: ${if (tapOk) "OK" else "NO"}"
-              }
+              private fun saveSettings(natural: Boolean) {
 
-              private fun launch() {
-                  val ed = getSharedPreferences("cfg", MODE_PRIVATE).edit()
-                  checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
-                  ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
-                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(4, 60) ?: 16)
-                      .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
+                  var min = number(minDelay, 60)
+                  var max = number(maxDelay, 140)
+
+                  min = min.coerceIn(5, 5000)
+                  max = max.coerceIn(min, 5000)
+
+                  val jitterValue =
+                      number(jitter, 8).coerceIn(0, 100)
+
+                  val chance =
+                      number(pauseChance, 8).coerceIn(0, 100)
+
+                  val pMin =
+                      number(minPause, 300).coerceIn(50, 10000)
+
+                  val pMax =
+                      number(maxPause, 900).coerceIn(pMin, 15000)
+
+                  val hMin =
+                      number(minHold, 35).coerceIn(5, 1000)
+
+                  val hMax =
+                      number(maxHold, 80).coerceIn(hMin, 2000)
+
+                  prefs.edit()
+                      .putBoolean("natural", natural)
+                      .putInt("minDelay", min)
+                      .putInt("maxDelay", max)
+                      .putInt("jitter", jitterValue)
+                      .putInt("pauseChance", chance)
+                      .putInt("minPause", pMin)
+                      .putInt("maxPause", pMax)
+                      .putInt("minHold", hMin)
+                      .putInt("maxHold", hMax)
                       .apply()
 
-                  if (!Settings.canDrawOverlays(this)) { toast("Do step 1 first"); return }
-                  if (TapService.instance == null) { toast("Do step 2 first"); return }
-                  if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
-
-                  val mpm = getSystemService(MediaProjectionManager::class.java)
-                  @Suppress("DEPRECATION")
-                  startActivityForResult(mpm.createScreenCaptureIntent(), 1)
+                  updateStatus()
               }
 
-              @Deprecated("Deprecated in Java")
-              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-                  @Suppress("DEPRECATION")
-                  super.onActivityResult(requestCode, resultCode, data)
-                  if (requestCode != 1) return
-                  if (resultCode != RESULT_OK || data == null) { toast("Screen capture is needed to find balloons"); return }
-                  startForegroundService(Intent(this, CaptureService::class.java)
-                      .putExtra("code", resultCode).putExtra("data", data))
-                  toast("Open your game and tap START")
-                  moveTaskToBack(true)
+              private fun updateStatus() {
+
+                  val min =
+                      prefs.getInt("minDelay", 60)
+
+                  val max =
+                      prefs.getInt("maxDelay", 140)
+
+                  val j =
+                      prefs.getInt("jitter", 8)
+
+                  status.text =
+                      "Timing: $min–$max ms\n" +
+                      "Position variation: ±$j px\n" +
+                      "Simulation ready"
               }
 
-              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+              inner class SimulatorView :
+                  View(this@MainActivity) {
+
+                  private val paint =
+                      Paint(Paint.ANTI_ALIAS_FLAG)
+
+                  private val handler =
+                      Handler(Looper.getMainLooper())
+
+                  private val taps =
+                      ArrayList<TapPoint>()
+
+                  private var running = false
+
+                  private var tapCount = 0
+
+                  private val balloonPaint =
+                      Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                          color = Color.rgb(80, 130, 255)
+                          style = Paint.Style.FILL
+                      }
+
+                  private val tapPaint =
+                      Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                          color = Color.RED
+                          style = Paint.Style.STROKE
+                          strokeWidth = 5f
+                      }
+
+                  override fun onDraw(canvas: Canvas) {
+
+                      super.onDraw(canvas)
+
+                      canvas.drawColor(
+                          Color.rgb(245, 245, 245)
+                      )
+
+                      val cx = width / 2f
+                      val cy = height / 2f
+
+                      paint.color = Color.DKGRAY
+                      paint.textSize = 22f
+
+                      canvas.drawText(
+                          "LOCAL TEST AREA",
+                          20f,
+                          35f,
+                          paint
+                      )
+
+                      balloonPaint.color =
+                          Color.rgb(90, 145, 255)
+
+                      canvas.drawCircle(
+                          cx,
+                          cy,
+                          55f,
+                          balloonPaint
+                      )
+
+                      paint.color = Color.WHITE
+                      paint.textSize = 18f
+
+                      canvas.drawText(
+                          "TEST",
+                          cx - 24f,
+                          cy + 6f,
+                          paint
+                      )
+
+                      synchronized(taps) {
+
+                          for (tap in taps) {
+
+                              tapPaint.alpha =
+                                  tap.alpha
+
+                              canvas.drawCircle(
+                                  tap.x,
+                                  tap.y,
+                                  18f,
+                                  tapPaint
+                              )
+                          }
+                      }
+
+                      paint.color = Color.DKGRAY
+                      paint.textSize = 18f
+
+                      canvas.drawText(
+                          "Simulated taps: $tapCount",
+                          20f,
+                          height - 25f,
+                          paint
+                      )
+                  }
+
+                  fun startSimulation() {
+
+                      if (running) return
+
+                      running = true
+                      tapCount = 0
+                      taps.clear()
+
+                      scheduleNext()
+                  }
+
+                  fun stopSimulation() {
+
+                      running = false
+                      handler.removeCallbacksAndMessages(null)
+
+                      invalidate()
+                  }
+
+                  private fun scheduleNext() {
+
+                      if (!running) return
+
+                      val min =
+                          prefs.getInt("minDelay", 60)
+
+                      val max =
+                          prefs.getInt("maxDelay", 140)
+
+                      val chance =
+                          prefs.getInt("pauseChance", 8)
+
+                      val minPauseValue =
+                          prefs.getInt("minPause", 300)
+
+                      val maxPauseValue =
+                          prefs.getInt("maxPause", 900)
+
+                      var delay =
+                          Random.nextLong(
+                              min.toLong(),
+                              max.toLong() + 1
+                          )
+
+                      if (
+                          Random.nextInt(100) < chance
+                      ) {
+
+                          delay += Random.nextLong(
+                              minPauseValue.toLong(),
+                              maxPauseValue.toLong() + 1
+                          )
+                      }
+
+                      handler.postDelayed(
+                          {
+
+                              if (!running) return@postDelayed
+
+                              createSimulatedTap()
+
+                              scheduleNext()
+                          },
+                          delay
+                      )
+                  }
+
+                  private fun createSimulatedTap() {
+
+                      val radius =
+                          prefs.getInt("jitter", 8)
+
+                      val angle =
+                          Random.nextDouble(
+                              0.0,
+                              Math.PI * 2
+                          )
+
+                      val distance =
+                          Random.nextDouble(
+                              0.0,
+                              radius.toDouble()
+                          )
+
+                      val cx = width / 2f
+                      val cy = height / 2f
+
+                      val x =
+                          cx +
+                          cos(angle).toFloat() *
+                          distance
+
+                      val y =
+                          cy +
+                          sin(angle).toFloat() *
+                          distance
+
+                      synchronized(taps) {
+
+                          taps.add(
+                              TapPoint(
+                                  x,
+                                  y,
+                                  255
+                              )
+                          )
+
+                          if (taps.size > 40) {
+                              taps.removeAt(0)
+                          }
+                      }
+
+                      tapCount++
+
+                      animateTap(x, y)
+
+                      invalidate()
+                  }
+
+                  private fun animateTap(
+                      x: Float,
+                      y: Float
+                  ) {
+
+                      val point =
+                          TapPoint(x, y, 255)
+
+                      synchronized(taps) {
+                          taps.add(point)
+                      }
+
+                      val fade =
+                          object : Runnable {
+
+                              override fun run() {
+
+                                  point.alpha -= 25
+
+                                  if (point.alpha <= 0) {
+
+                                      synchronized(taps) {
+                                          taps.remove(point)
+                                      }
+
+                                      invalidate()
+                                      return
+                                  }
+
+                                  invalidate()
+
+                                  handler.postDelayed(
+                                      this,
+                                      30
+                                  )
+                              }
+                          }
+
+                      handler.post(fade)
+                  }
+
+                  override fun onTouchEvent(
+                      event: MotionEvent
+                  ): Boolean {
+
+                      if (
+                          event.action ==
+                          MotionEvent.ACTION_DOWN
+                      ) {
+
+                          synchronized(taps) {
+
+                              taps.add(
+                                  TapPoint(
+                                      event.x,
+                                      event.y,
+                                      255
+                                  )
+                              )
+                          }
+
+                          invalidate()
+
+                          return true
+                      }
+
+                      return true
+                  }
+              }
+
+              data class TapPoint(
+                  val x: Float,
+                  val y: Float,
+                  var alpha: Int
+              )
           }
-          ENDOFFILE
+          EOF
+
       - name: Build APK
         run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          name: BalloonTapper-apk
+          name: BalloonTapper-Test-Simulator
           path: app/build/outputs/apk/debug/app-debug.apk
