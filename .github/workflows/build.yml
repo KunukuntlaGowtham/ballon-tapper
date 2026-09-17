@@ -244,6 +244,20 @@ jobs:
                   return PointF(x + gauss(0f, r * s.aim), y + gauss(0f, r * s.aim))
               }
 
+              /**
+               * Aim that scatters a little (so it isn't robotically dead-centre) but is clamped to stay
+               * on the balloon, so it never misses. Used by combo mode for blue & red.
+               */
+              fun aimWithin(x: Float, y: Float, radius: Float): PointF {
+                  val r = maxOf(12f, radius)
+                  var dx = gauss(0f, r * 0.30f)
+                  var dy = gauss(0f, r * 0.30f)
+                  val d = hypot(dx, dy)
+                  val maxD = r * 0.65f
+                  if (d > maxD && d > 0f) { dx = dx / d * maxD; dy = dy / d * maxD }
+                  return PointF(x + dx, y + dy)
+              }
+
               /** Attention slips: a balloon right there sometimes just doesn't get tapped. */
               fun ignores() = chance(style.ignore)
 
@@ -1020,7 +1034,11 @@ jobs:
                                   ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                               }
                           }
-                          if (human && !comboMode) {
+                          if (comboMode) {
+                              // blue & red: land somewhere on the balloon, never off it
+                              val p = humanizer.aimWithin(tx, ty, sqrt(bl[2] / 3.14f) * sx)
+                              tx = p.x; ty = p.y
+                          } else if (human) {
                               val p = humanizer.aim(tx, ty, sqrt(bl[2] / 3.14f) * sx)
                               tx = p.x; ty = p.y
                           }
