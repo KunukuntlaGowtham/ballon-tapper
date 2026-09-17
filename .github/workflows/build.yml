@@ -683,6 +683,7 @@ jobs:
               // settings
               private var enabledColours = booleanArrayOf(true, true, true, true)
               private var comboMode = false   // only blue & red, dead-centre, no misses
+              private var coverAll = false    // tap every balloon non-stop, human timing kept
               private var maxTaps = 6
               private var fingersHuman = 1
               private var fingersMachine = 2
@@ -764,6 +765,7 @@ jobs:
                       p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
                   )
                   comboMode = p.getBoolean("combo", false)
+                  coverAll = p.getBoolean("coverAll", false)
                   maxTaps = p.getInt("maxTaps", 6)
                   fingersHuman = p.getInt("fingersHuman", 1).coerceIn(1, 5)
                   fingersMachine = p.getInt("fingersMachine", 1).coerceIn(1, 5)
@@ -941,7 +943,7 @@ jobs:
                   val human = humanizer.on && !turbo   // TURBO button forces the fast machine path
                   if (human) { humanizer.tick(now - startedAt); humanizer.forgetOld(now) }
                   val reactMs = if (human) humanizer.reactionMs() else 0f
-                  val resting = human && humanizer.restingAt(now)   // looking away, shifting grip, hesitating
+                  val resting = human && !coverAll && humanizer.restingAt(now)   // breaks off in cover-all
                   val hits = ArrayList<PointF>()
                   try {
                       val plane = img.planes[0]
@@ -1048,7 +1050,7 @@ jobs:
                               }
                           }
                           val ac = bl[3].toInt()
-                          if (comboMode && (ac == 0 || ac == 1)) {
+                          if (coverAll || (comboMode && (ac == 0 || ac == 1))) {
                               // blue & red: land somewhere on the balloon, never off it
                               val p = humanizer.aimWithin(tx, ty, sqrt(bl[2] / 3.14f) * sx)
                               tx = p.x; ty = p.y
@@ -1089,6 +1091,7 @@ jobs:
                       // one hand can only manage a few taps before it has to move and look again
                       val tapLimit = when {
                           resting -> 0
+                          coverAll -> maxOf(maxTaps, minOf(normal.size, 18))   // as many as are on screen
                           turbo -> maxOf(maxTaps * 2, 16)                       // 4 fingers, machine speed
                           human -> {                                            // 2 thumbs at a human pace
                               val perThumb = humanizer.burstLimit() + if (frenzy) 1 else 0
@@ -1124,7 +1127,7 @@ jobs:
                           if (hits.size >= tapLimit) break
                           val col = bl[3].toInt()
                           if (!enabledColours[col]) continue
-                          val priority = comboMode && (col == 0 || col == 1)   // blue/red: never skip these
+                          val priority = coverAll || (comboMode && (col == 0 || col == 1))   // never skip these
                           val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
                           if (human && !priority) {
                               if ((ages[bl] ?: 0f) < reactMs) continue   // the eyes haven't caught it yet
@@ -1535,6 +1538,7 @@ jobs:
               private lateinit var styleGroup: RadioGroup
               private lateinit var fxCheck: CheckBox
               private lateinit var comboCheck: CheckBox
+              private lateinit var coverCheck: CheckBox
               private lateinit var gapInput: EditText
               private lateinit var maxTaps: EditText
               private lateinit var skipTop: EditText
@@ -1568,6 +1572,12 @@ jobs:
                       isChecked = prefs.getBoolean("combo", false)
                   }
                   root.addView(comboCheck)
+
+                  coverCheck = CheckBox(this).apply {
+                      text = "Tap every balloon non-stop (keeps human timing, no breaks or misses)"
+                      isChecked = prefs.getBoolean("coverAll", false)
+                  }
+                  root.addView(coverCheck)
 
                   root.addView(label("Max taps per scan"))
                   maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 6).toString()) }
@@ -1667,6 +1677,7 @@ jobs:
                   checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
                   ed.putBoolean("fx", fxCheck.isChecked)
                   ed.putBoolean("combo", comboCheck.isChecked)
+                  ed.putBoolean("coverAll", coverCheck.isChecked)
                   ed.putInt("gapMs", gapInput.text.toString().toIntOrNull()?.let { if (it <= 0) 0 else it.coerceIn(5, 2000) } ?: 0)
                   ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
                   ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 3))
