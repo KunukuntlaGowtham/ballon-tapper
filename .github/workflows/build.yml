@@ -1034,7 +1034,8 @@ jobs:
                                   ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
                               }
                           }
-                          if (comboMode) {
+                          val ac = bl[3].toInt()
+                          if (comboMode && (ac == 0 || ac == 1)) {
                               // blue & red: land somewhere on the balloon, never off it
                               val p = humanizer.aimWithin(tx, ty, sqrt(bl[2] / 3.14f) * sx)
                               tx = p.x; ty = p.y
@@ -1102,13 +1103,17 @@ jobs:
                           // balloons closest to escaping off the top go first, then bigger ones
                           normal.sortWith(compareBy<FloatArray> { it[1] }.thenByDescending { it[2] })
                       }
+                      if (comboMode) {
+                          // blue & red get first pick of the tap budget, others still get popped after
+                          normal.sortBy { val c = it[3].toInt(); if (c == 0 || c == 1) 0 else 1 }
+                      }
                       for (bl in normal) {
                           if (hits.size >= tapLimit) break
                           val col = bl[3].toInt()
-                          if (comboMode && col != 0 && col != 1) continue   // combo: blue & red only
-                          if (!comboMode && !enabledColours[col]) continue
+                          if (!enabledColours[col]) continue
+                          val priority = comboMode && (col == 0 || col == 1)   // blue/red: never skip these
                           val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          if (human && !comboMode) {
+                          if (human && !priority) {
                               if ((ages[bl] ?: 0f) < reactMs) continue   // the eyes haven't caught it yet
                               if (humanizer.ignores()) continue          // looked straight past it
                           }
@@ -1542,7 +1547,7 @@ jobs:
                   }
 
                   comboCheck = CheckBox(this).apply {
-                      text = "Combo mode: hit only Blue & Red, dead-centre (for multipliers)"
+                      text = "Combo mode: never miss Blue & Red (still pops Yellow & Green too)"
                       isChecked = prefs.getBoolean("combo", false)
                   }
                   root.addView(comboCheck)
