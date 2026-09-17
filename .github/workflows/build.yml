@@ -1246,7 +1246,9 @@ jobs:
                   fun hits(params: WindowManager.LayoutParams?, view: android.view.View?): Boolean {
                       val p = params ?: return false
                       val v = view ?: return false
-                      return x >= p.x - pad && x <= p.x + v.width + pad && y >= p.y - pad && y <= p.y + v.height + pad
+                      val vw = if (v.width > 0) v.width else 400   // fallback if not measured yet
+                      val vh = if (v.height > 0) v.height else 140
+                      return x >= p.x - pad && x <= p.x + vw + pad && y >= p.y - pad && y <= p.y + vh + pad
                   }
                   return hits(overlayParams, overlay) || hits(turboParams, turboBtn)
               }
@@ -1270,7 +1272,7 @@ jobs:
                   val txt = when {
                       captureLost -> "\u21BB RESUME"
                       running -> "\u25A0 STOP" +
-                              (if (turbo) "   \u26A1TURBO" else if (rush && !humanizer.on) "   \u26A1RUSH" else "") +
+                              (if (turbo) "   TURBO" else if (rush && !humanizer.on) "   RUSH" else "") +
                               (if (humanizer.on && !turbo) "   \u00B7 ${humanizer.name}" else "") +
                               "\n$totalTaps taps  \u00B7  $rate/s" +
                               "\nnext special: ${colourNames[nextSpecial]}"
@@ -1291,9 +1293,9 @@ jobs:
               private fun setTurboButton() {
                   val txt = when {
                       captureLost -> "\u21BB RESUME"
-                      running && turbo -> "\u26A1 MACHINE \u2713"
-                      running -> "\u26A1 MACHINE"
-                      else -> "\u26A1 MACHINE + START"
+                      running && turbo -> "MACHINE \u2713"
+                      running -> "MACHINE"
+                      else -> "MACHINE + START"
                   }
                   val bg = when {
                       captureLost -> Color.argb(215, 180, 90, 0)
@@ -1311,7 +1313,7 @@ jobs:
               @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
               private fun showTurboButton() {
                   val tv = TextView(this).apply {
-                      text = "\u26A1 MACHINE + START"
+                      text = "MACHINE + START"
                       textSize = 14f
                       typeface = android.graphics.Typeface.DEFAULT_BOLD
                       setTextColor(Color.WHITE)
