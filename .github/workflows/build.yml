@@ -133,18 +133,48 @@ jobs:
            * misses a balloon that was right there, glances away for a beat and slows down as the hand tires.
            * Everything here is the same idea: take a number the machine would keep exactly, and stop keeping
            * it exactly.
+           *
+           * The three levels are one person at three speeds. None of them goes past what a thumb can really
+           * do: the quickest works out at roughly ten taps a second in a burst, and it pays for that speed
+           * with looser aim, the way a real hand does.
            */
           class Humanizer {
 
               companion object {
                   const val OFF = 0        // the old machine behaviour: instant, perfect, relentless
-                  const val CASUAL = 1     // someone playing with one thumb on the sofa
-                  const val FOCUSED = 2    // someone actually trying, but still a person
+                  const val CASUAL = 1     // one thumb, no hurry
+                  const val FOCUSED = 2    // playing properly
+                  const val RAPID = 3      // flat out, near the top of what a hand manages
+
+                  /** The dials that make one level feel different from the next. */
+                  private class Style(
+                      val react: Float, val reactSd: Float,       // how long before a balloon registers
+                      val hold: Float, val holdSd: Float,         // how long the finger stays down
+                      val travel: Float, val perDp: Float,        // moving the finger to the next balloon
+                      val settle: Float, val settleSd: Float,     // the beat between bursts
+                      val burst: Int, val burstSpread: Int,       // taps before the eyes go looking again
+                      val aim: Float, val fumble: Float, val ignore: Float,
+                      val pauseEvery: Float, val pause: Float,    // glancing away, shifting grip
+                      val tire: Float                             // how much a long session slows it down
+                  )
+
+                  private val STYLES = arrayOf(
+                      // casual: about four taps a second in a burst, and in no rush between them
+                      Style(210f, 60f, 72f, 22f, 62f, 0.26f, 140f, 55f, 3, 2, 0.38f, 0.040f, 0.050f, 7000f, 380f, 0.35f),
+                      // focused: six or seven a second, steady aim, short breaks
+                      Style(140f, 35f, 52f, 15f, 44f, 0.18f, 90f, 30f, 4, 3, 0.30f, 0.025f, 0.025f, 11000f, 300f, 0.25f),
+                      // rapid: around ten a second, barely stops, and misses more because of it
+                      Style(105f, 28f, 40f, 12f, 32f, 0.12f, 60f, 22f, 5, 3, 0.36f, 0.050f, 0.010f, 16000f, 220f, 0.15f)
+                  )
               }
 
-              var level = CASUAL
+              var level = FOCUSED
               val on: Boolean get() = level != OFF
-              val name: String get() = when (level) { FOCUSED -> "focused" ; CASUAL -> "casual" ; else -> "machine" }
+              val name: String get() = when (level) {
+                  RAPID -> "rapid" ; FOCUSED -> "focused" ; CASUAL -> "casual" ; else -> "machine"
+              }
+
+              private val style: Style get() = STYLES[level.coerceIn(CASUAL, RAPID) - 1]
 
               private val rnd = Random(System.nanoTime())
               private val sight = ArrayList<FloatArray>()      // x, y, firstSeen, lastSeen
@@ -166,9 +196,10 @@ jobs:
               // --- noticing a balloon ------------------------------------------------
 
               /** How long a balloon has to be on screen before a person reacts to it. */
-              fun reactionMs(): Float =
-                  if (level == FOCUSED) gauss(170f, 45f).coerceIn(90f, 340f)
-                  else gauss(255f, 75f).coerceIn(140f, 520f)
+              fun reactionMs(): Float {
+                  val s = style
+                  return gauss(s.react, s.reactSd).coerceIn(s.react * 0.55f, s.react * 2f)
+              }
 
               /**
                * Remembers where balloons were, so we know how long this one has been in view.
@@ -199,18 +230,18 @@ jobs:
 
               /** A thumb lands somewhere on the balloon, and every so often just beside it. */
               fun aim(x: Float, y: Float, radius: Float): PointF {
+                  val s = style
                   val r = maxOf(12f, radius)
-                  if (chance(if (level == FOCUSED) 0.02f else 0.05f)) {
+                  if (chance(s.fumble)) {
                       val t = rnd.nextFloat() * 2f * PI.toFloat()
                       val off = r * gauss(1.25f, 0.15f)
                       return PointF(x + cos(t) * off, y + sin(t) * off)     // fumbled: lands just off the balloon
                   }
-                  val spread = if (level == FOCUSED) 0.28f else 0.40f
-                  return PointF(x + gauss(0f, r * spread), y + gauss(0f, r * spread))
+                  return PointF(x + gauss(0f, r * s.aim), y + gauss(0f, r * s.aim))
               }
 
               /** Attention slips: a balloon right there sometimes just doesn't get tapped. */
-              fun ignores() = chance(if (level == FOCUSED) 0.03f else 0.07f)
+              fun ignores() = chance(style.ignore)
 
               /** Nobody predicts a moving balloon perfectly, so lead it by a wrong amount. */
               fun leadNoise(): Float = gauss(1f, 0.25f).coerceIn(0.4f, 1.6f)
@@ -218,24 +249,27 @@ jobs:
               // --- rhythm ------------------------------------------------------------
 
               /** How many balloons get tapped before the eyes go looking again. */
-              fun burstLimit(): Int = if (level == FOCUSED) 3 + rnd.nextInt(2) else 2 + rnd.nextInt(2)
+              fun burstLimit(): Int = style.burst + rnd.nextInt(style.burstSpread)
 
               /** How long the finger stays down. */
-              fun holdMs(): Long =
-                  (if (level == FOCUSED) gauss(62f, 18f) else gauss(88f, 28f)).coerceIn(35f, 190f).toLong()
+              fun holdMs(): Long {
+                  val s = style
+                  return gauss(s.hold, s.holdSd).coerceIn(s.hold * 0.5f, s.hold * 2.4f).toLong()
+              }
 
               /** Time to move the finger to the next balloon: further away takes longer (Fitts, roughly). */
               fun travelMs(from: PointF, to: PointF, density: Float): Long {
+                  val s = style
                   val dist = if (from.x < 0f) 0f else hypot(to.x - from.x, to.y - from.y) / maxOf(1f, density)
-                  val base = if (level == FOCUSED) 55f else 80f
-                  val perDp = if (level == FOCUSED) 0.22f else 0.32f
-                  return (gauss(base + dist * perDp, 22f) * tiredFactor()).coerceIn(35f, 900f).toLong()
+                  return (gauss(s.travel + dist * s.perDp, s.travel * 0.3f) * tiredFactor())
+                      .coerceIn(s.travel * 0.55f, 900f).toLong()
               }
 
               /** Pause after a burst, while the eyes pick the next balloons. */
-              fun settleMs(): Long =
-                  ((if (level == FOCUSED) gauss(110f, 40f) else gauss(180f, 70f)) * tiredFactor())
-                      .coerceIn(50f, 900f).toLong()
+              fun settleMs(): Long {
+                  val s = style
+                  return (gauss(s.settle, s.settleSd) * tiredFactor()).coerceIn(s.settle * 0.4f, s.settle * 4f).toLong()
+              }
 
               /** Fingers slide a little while they press; a perfectly still touch is a giveaway. */
               fun drift(): PointF {
@@ -251,7 +285,7 @@ jobs:
 
               // --- the hand over time ------------------------------------------------
 
-              private fun tiredFactor(): Float = 1f + tiredness * 0.35f
+              private fun tiredFactor(): Float = 1f + tiredness * style.tire
 
               /** Slows down over a long session, with sharper patches and sloppier ones along the way. */
               fun tick(playedMs: Long) {
@@ -260,21 +294,24 @@ jobs:
                   tiredness = (stint * 0.7f + wave * 0.3f).coerceIn(0f, 1f)
               }
 
-              /** Every few seconds a person glances away, shifts grip, or simply hesitates. */
+              /** Every so often a person glances away, shifts grip, or simply hesitates. */
               fun restingAt(now: Long): Boolean {
+                  val s = style
                   if (now < pauseUntil) return true
                   if (nextPauseAt == 0L) { nextPauseAt = now + pauseSpacing(); return false }
                   if (now >= nextPauseAt) {
-                      val len = if (chance(0.15f)) gauss(1500f, 450f) else gauss(430f, 150f)
-                      pauseUntil = now + len.coerceIn(150f, 2800f).toLong()
+                      val len = if (chance(0.12f)) gauss(s.pause * 3f, s.pause) else gauss(s.pause, s.pause * 0.35f)
+                      pauseUntil = now + len.coerceIn(120f, 2800f).toLong()
                       nextPauseAt = pauseUntil + pauseSpacing()
                       return true
                   }
                   return false
               }
 
-              private fun pauseSpacing(): Long =
-                  gauss(if (level == FOCUSED) 9000f else 5500f, 2200f).coerceIn(2000f, 20000f).toLong()
+              private fun pauseSpacing(): Long {
+                  val s = style
+                  return gauss(s.pauseEvery, s.pauseEvery * 0.3f).coerceIn(2000f, 30000f).toLong()
+              }
           }
           ENDOFFILE
           mkdir -p app/src/main/java/com/example/balloontapper
@@ -648,7 +685,7 @@ jobs:
                   customGapMs = p.getInt("gapMs", 0).toLong()
                   if (customGapMs > 0) { tapGapMs = customGapMs; tapHoldMs = minOf(tapHoldMs, maxOf(4L, customGapMs - 1)) }
                   // play style: the human levels work out their own timings and ignore the speed above
-                  humanizer.level = p.getInt("human", Humanizer.CASUAL).coerceIn(Humanizer.OFF, Humanizer.FOCUSED)
+                  humanizer.level = p.getInt("human", Humanizer.FOCUSED).coerceIn(Humanizer.OFF, Humanizer.RAPID)
               }
 
               private fun startCapture(code: Int, data: Intent) {
@@ -889,8 +926,8 @@ jobs:
                           frenzy -> maxOf(maxTaps * 2, 12)
                           else -> maxTaps
                       }
-                      val minGuard = if (frenzy && !human) 32f else 50f
-                      recentTaps.removeAll { nowRel - it[2] > (if (frenzy && !human) 180f else tapCooldownMs) }
+                      val minGuard = if (frenzy) (if (human) 40f else 32f) else 50f
+                      recentTaps.removeAll { nowRel - it[2] > (if (frenzy) (if (human) 200f else 180f) else tapCooldownMs) }
                       val ages = HashMap<FloatArray, Float>()
                       if (human && !resting) {
                           // the eyes take in the whole screen, then the hand reaches for what is nearest
@@ -1222,14 +1259,15 @@ jobs:
                   root.addView(label("Play style"))
                   val styleNames = listOf(
                       "Machine - instant, perfect aim, never stops",
-                      "Human - casual (uneven rhythm, misses a few, takes breaks)",
-                      "Human - focused (quicker and steadier, still a person)"
+                      "Human - casual (about 4 taps a second, takes breaks)",
+                      "Human - focused (about 6-7 a second, steady aim)",
+                      "Human - rapid (about 10 a second, looser aim for it)"
                   )
                   styleGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
                   styleNames.forEachIndexed { i, name ->
                       styleGroup.addView(RadioButton(this).apply { text = name; id = 200 + i })
                   }
-                  styleGroup.check(200 + prefs.getInt("human", Humanizer.CASUAL))
+                  styleGroup.check(200 + prefs.getInt("human", Humanizer.FOCUSED))
                   root.addView(styleGroup)
 
                   root.addView(label("Tap speed (used by the machine style only)"))
@@ -1275,7 +1313,7 @@ jobs:
                   ed.putBoolean("fx", fxCheck.isChecked)
                   ed.putInt("gapMs", gapInput.text.toString().toIntOrNull()?.let { if (it <= 0) 0 else it.coerceIn(5, 2000) } ?: 0)
                   ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
-                  ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 2))
+                  ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 3))
                   ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 30) ?: 6)
                       .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
                       .apply()
