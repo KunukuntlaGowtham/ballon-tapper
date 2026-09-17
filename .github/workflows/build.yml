@@ -315,8 +315,10 @@ jobs:
                */
               fun fingerCount(frenzy: Boolean, balloons: Int): Int {
                   if (!frenzy) return 2
-                  val cap = when (level) { RAPID -> 5 ; FOCUSED -> 4 ; else -> 3 }
-                  return (2 + balloons / 6).coerceIn(2, cap)
+                  // capped low on purpose: many simultaneous touch strokes can destabilise the input
+                  // system on some phones, and two-to-three fingers already clears a flood fast
+                  val cap = when (level) { RAPID -> 3 ; FOCUSED -> 3 ; else -> 2 }
+                  return (2 + balloons / 10).coerceIn(2, cap)
               }
 
               /** Fingers never land in perfect unison; each comes down a little apart from the rest. */
@@ -379,6 +381,10 @@ jobs:
 
               companion object {
                   @Volatile var instance: TapService? = null
+
+                  /** Fingers we can dispatch at once without straining the input system. */
+                  fun maxSafeFingers(): Int =
+                      maxOf(1, minOf(GestureDescription.getMaxStrokeCount(), 3))
               }
 
               override fun onServiceConnected() { instance = this }
@@ -396,7 +402,10 @@ jobs:
               /** Plays a sequence of taps with their own timings, then calls done(). */
               fun tapTaps(taps: List<Tap>, done: () -> Unit) {
                   if (taps.isEmpty()) { done(); return }
-                  val maxStrokes = maxOf(1, GestureDescription.getMaxStrokeCount())
+                  // Stay well under the device's stroke limit and keep each gesture small: flooding the
+                  // input system with big, overlapping multi-touch gestures can crash system_server and
+                  // soft-reboot the phone, so cap it conservatively.
+                  val maxStrokes = maxOf(1, minOf(GestureDescription.getMaxStrokeCount(), 4))
                   val chunks = taps.chunked(maxStrokes)
                   fun send(i: Int) {
                       if (i >= chunks.size) { done(); return }
@@ -737,7 +746,7 @@ jobs:
                   humanizer.level = p.getInt("human", Humanizer.FOCUSED).coerceIn(Humanizer.OFF, Humanizer.RAPID)
                   // human styles pace themselves through settle/travel; keep the scan loop tight so
                   // the wait between bursts is the human pause, not loop overhead on top of it
-                  if (humanizer.on) loopMs = 8L
+                  if (humanizer.on) loopMs = 16L
               }
 
               private fun startCapture(code: Int, data: Intent) {
@@ -1061,7 +1070,9 @@ jobs:
                       // same time, so throughput rises without any single finger tapping faster.
                       val density = resources.displayMetrics.density
                       val rushNow = SystemClock.uptimeMillis() < frenzyUntil
-                      val fingers = maxOf(1, humanizer.fingerCount(rushNow, hits.size))
+                      // never ask for more simultaneous fingers than the device can safely dispatch
+                      val strokeRoom = maxOf(1, minOf(TapService.maxSafeFingers(), 3))
+                      val fingers = maxOf(1, minOf(humanizer.fingerCount(rushNow, hits.size), strokeRoom))
                       // hand each finger a contiguous slice of the screen, left to right, like real hands
                       val ordered = hits.sortedBy { it.x }
                       val n = ordered.size
@@ -1103,7 +1114,7 @@ jobs:
                           maxEnd = maxOf(maxEnd, at)
                       }
                       taps.sortBy { it.startMs }
-                      val settle = humanizer.settleMs()
+                      val settle = maxOf(humanizer.settleMs(), 30L)
                       busyLimitMs = maxEnd + 2000L
                       tapper.tapTaps(taps) {
                           nextScanAt = SystemClock.uptimeMillis() + settle
