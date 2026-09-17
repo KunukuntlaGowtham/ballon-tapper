@@ -1141,6 +1141,7 @@ jobs:
                       }
                       prevBlobs = current
                       prevFrameAt = now
+                      onScreen = normal.size + specials.size   // for the live stats HUD
 
                       // live detection view (about 30 updates a second)
                       val fx = fxView
@@ -1298,12 +1299,15 @@ jobs:
                   if (count > 0) { totalTaps += count; tapLog.addLast(longArrayOf(now, count.toLong())) }
                   while (tapLog.isNotEmpty() && now - tapLog.first()[0] > 1000) tapLog.removeFirst()
                   rateNow = tapLog.sumOf { it[1] }
+                  if (rateNow > peakRate) peakRate = rateNow
                   if (now - lastStatsAt < 250) return
                   lastStatsAt = now
                   setButton()
               }
               private var lastStatsAt = 0L
               @Volatile private var rateNow = 0L
+              @Volatile private var peakRate = 0L
+              @Volatile private var onScreen = 0
               private val colourNames = arrayOf("BLUE", "RED", "YELLOW", "GREEN")
 
               private fun setButton() {
@@ -1314,8 +1318,8 @@ jobs:
                       running -> "\u25A0 STOP" +
                               (if (turbo) "   TURBO" else if (rush && !humanizer.on) "   RUSH" else "") +
                               (if (humanizer.on && !turbo) "   \u00B7 ${humanizer.name}" else "") +
-                              "\n$totalTaps taps  \u00B7  $rate/s" +
-                              "\nnext special: ${colourNames[nextSpecial]}"
+                              "\n$totalTaps taps  \u00B7  $rate/s  (peak $peakRate)" +
+                              "\n$onScreen on screen  \u00B7  next: ${colourNames[nextSpecial]}"
                       else -> "\u25B6 START" + (if (totalTaps > 0) "\n$totalTaps taps" else "")
                   }
                   val bg = when {
@@ -1478,7 +1482,7 @@ jobs:
                                   else -> {
                                       running = !running
                                       saveRunning(running)
-                                      if (running) turbo = false      // START is always the human style
+                                      if (running) { turbo = false; peakRate = 0L }   // fresh run, fresh peak
                                       else { turbo = false; fxView?.setTargets(FloatArray(0)) }
                                       busy = false
                                       setButton()
