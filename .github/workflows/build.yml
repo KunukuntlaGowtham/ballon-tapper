@@ -715,7 +715,7 @@ jobs:
                       // Android restarted the service (memory/CPU pressure) without the capture token.
                       // Don't strand the user on a dead START: if we had been running, show RESUME so a
                       // single tap re-grants capture and continues.
-                      if (loadRunning()) { running = true; captureLost = true }
+                      if (loadRunning()) { running = true; captureLost = true; mainHandler.post { autoResume() } }
                       setButton()
                       setTurboButton()
                   }
@@ -787,11 +787,14 @@ jobs:
                   projection = proj
                   proj.registerCallback(object : MediaProjection.Callback() {
                       override fun onStop() {
-                          // Android stopped screen capture (screen locked, call, etc.). Keep the app alive and ask to resume.
+                          // Android stopped screen capture (heavy load, an ad, a secure screen, etc.).
+                          // Don't sit waiting for a tap: re-request capture straight away and carry on.
                           Log.w(TAG, "projection stopped")
                           captureLost = true
                           releaseCapture()
                           setButton()
+                          setTurboButton()
+                          if (running || loadRunning()) mainHandler.post { autoResume() }
                       }
                   }, handler)
 
@@ -1132,7 +1135,7 @@ jobs:
                   // vertical slice of the screen and its own timeline; gestures stay small (at most a
                   // handful of strokes) so the input system is never flooded.
                   val density = resources.displayMetrics.density
-                  val want = if (human) 2 else 4
+                  val want = if (human) 2 else 3   // machine trimmed from 4: four was overloading the phone
                   val fingers = maxOf(1, minOf(want, TapService.maxSafeFingers()))
                   val ordered = hits.sortedBy { it.x }
                   val n = ordered.size
@@ -1353,9 +1356,19 @@ jobs:
               /** Re-ask Android for screen capture after it stopped, then carry on where we left off. */
               private fun resumeCapture() {
                   running = true
+                  saveRunning(true)
                   startActivity(Intent(this, MainActivity::class.java)
                       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                       .putExtra("resume", true))
+              }
+
+              /** Re-request capture on its own, but not more than once every few seconds (no dialog spam). */
+              private var lastResumeAt = 0L
+              private fun autoResume() {
+                  val now = SystemClock.uptimeMillis()
+                  if (now - lastResumeAt < 4000) return
+                  lastResumeAt = now
+                  try { resumeCapture() } catch (t: Throwable) { Log.e(TAG, "auto resume failed", t) }
               }
 
               private fun showDetectionView() {
