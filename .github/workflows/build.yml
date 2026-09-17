@@ -605,7 +605,7 @@ jobs:
                       floatArrayOf(3f, 128f, 154f, 0.35f, 0.74f, 0.62f)
                   )
                   private val RING_HUE = floatArrayOf(213f, 3f, 51f, 133f)
-                  private const val SCALE = 4
+                  private const val SCALE = 5   // more downsampling = far less CPU per scan; balloons are big enough
               }
 
               // capture
@@ -702,6 +702,8 @@ jobs:
                       try {
                           startCapture(code, data)
                           captureLost = false
+                          running = true
+                          saveRunning(true)
                           setButton()
                           setTurboButton()
                       } catch (t: Throwable) {
@@ -709,9 +711,17 @@ jobs:
                           captureLost = true
                           setButton()
                       }
+                  } else if (projection == null) {
+                      // Android restarted the service (memory/CPU pressure) without the capture token.
+                      // Don't strand the user on a dead START: if we had been running, show RESUME so a
+                      // single tap re-grants capture and continues.
+                      if (loadRunning()) { running = true; captureLost = true }
+                      setButton()
+                      setTurboButton()
                   }
                   if (!loopStarted) { loopStarted = true; handler.post(loop) }
-                  return START_NOT_STICKY
+                  // START_REDELIVER_INTENT so the system re-hands us the capture intent if it can
+                  return START_REDELIVER_INTENT
               }
 
               private fun startAsForeground() {
@@ -1321,7 +1331,7 @@ jobs:
                           MotionEvent.ACTION_UP -> if (!moved) {
                               when {
                                   captureLost -> resumeCapture()          // this button resumes too
-                                  !running -> { running = true; turbo = true; busy = false }   // MACHINE + START in one tap
+                                  !running -> { running = true; turbo = true; busy = false; saveRunning(true) }  // MACHINE + START
                                   else -> { turbo = !turbo; busy = false }  // toggle machine while running
                               }
                               setTurboButton()
@@ -1333,6 +1343,12 @@ jobs:
                   try { wm.addView(tv, params); turboBtn = tv; turboParams = params; setTurboButton() }
                   catch (t: Throwable) { Log.e(TAG, "turbo button failed", t) }
               }
+
+              private fun saveRunning(on: Boolean) {
+                  try { getSharedPreferences("cfg", MODE_PRIVATE).edit().putBoolean("wasRunning", on).apply() } catch (_: Throwable) {}
+              }
+              private fun loadRunning(): Boolean =
+                  try { getSharedPreferences("cfg", MODE_PRIVATE).getBoolean("wasRunning", false) } catch (_: Throwable) { false }
 
               /** Re-ask Android for screen capture after it stopped, then carry on where we left off. */
               private fun resumeCapture() {
@@ -1394,10 +1410,11 @@ jobs:
                           }
                           MotionEvent.ACTION_UP -> if (!moved) {
                               when {
-                                  SystemClock.uptimeMillis() - downTime > 800 -> stopSelf()   // long-press = quit
+                                  SystemClock.uptimeMillis() - downTime > 800 -> { saveRunning(false); stopSelf() }   // long-press = quit
                                   captureLost -> resumeCapture()
                                   else -> {
                                       running = !running
+                                      saveRunning(running)
                                       if (running) turbo = false      // START is always the human style
                                       else { turbo = false; fxView?.setTargets(FloatArray(0)) }
                                       busy = false
