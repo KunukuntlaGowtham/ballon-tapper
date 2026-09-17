@@ -1167,7 +1167,7 @@ jobs:
                           if (human) {
                               // sometimes a thumb darts past a far balloon and corrects back onto it
                               val over = humanizer.overshoot(from, p, density)
-                              if (over != null) {
+                              if (over != null && !onOverlay(over.x, over.y)) {
                                   at += humanizer.travelMs(from, over, density)
                                   val h0 = maxOf(12L, humanizer.holdMs() / 2)
                                   val d0 = humanizer.drift()
@@ -1180,7 +1180,7 @@ jobs:
                               val d = humanizer.drift()
                               taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
                               at += hold
-                              if (humanizer.doubleTap()) {
+                              if (humanizer.doubleTap() && !onOverlay(p.x, p.y)) {
                                   at += humanizer.doubleGapMs()
                                   val h2 = humanizer.holdMs()
                                   val d2 = humanizer.drift()
@@ -1240,11 +1240,15 @@ jobs:
                   return best
               }
 
+              /** True if (x, y) lands on (or near) either floating button, so we never tap our own controls. */
               private fun onOverlay(x: Float, y: Float): Boolean {
-                  val p = overlayParams ?: return false
-                  val v = overlay ?: return false
-                  val pad = 40
-                  return x >= p.x - pad && x <= p.x + v.width + pad && y >= p.y - pad && y <= p.y + v.height + pad
+                  val pad = 70
+                  fun hits(params: WindowManager.LayoutParams?, view: android.view.View?): Boolean {
+                      val p = params ?: return false
+                      val v = view ?: return false
+                      return x >= p.x - pad && x <= p.x + v.width + pad && y >= p.y - pad && y <= p.y + v.height + pad
+                  }
+                  return hits(overlayParams, overlay) || hits(turboParams, turboBtn)
               }
 
               private fun updateStats(count: Int) {
