@@ -1270,7 +1270,10 @@ jobs:
                   styleGroup.check(200 + prefs.getInt("human", Humanizer.FOCUSED))
                   root.addView(styleGroup)
 
-                  root.addView(label("Tap speed (used by the machine style only)"))
+                  // The two settings below are the machine's fixed rhythm. The human styles work out
+                  // their own timings tap by tap, so these grey out whenever a human style is picked.
+                  val speedLabel = label("Tap speed (machine style only)")
+                  root.addView(speedLabel)
                   val speedNames = listOf("Relaxed (1 tap every 120 ms)", "Normal (1 tap every 70 ms)", "Quick (1 tap every 40 ms)")
                   speedGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
                   speedNames.forEachIndexed { i, name ->
@@ -1279,9 +1282,23 @@ jobs:
                   speedGroup.check(100 + prefs.getInt("speed", 1))
                   root.addView(speedGroup)
 
-                  root.addView(label("Fixed gap between taps in ms (leave 0 to use the speed above)"))
+                  val gapLabel = label("Fixed gap between taps in ms (machine style only, 0 = use the speed above)")
+                  root.addView(gapLabel)
                   gapInput = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("gapMs", 0).toString()) }
                   root.addView(gapInput)
+
+                  fun showMachineSettings() {
+                      val machine = styleGroup.checkedRadioButtonId == 200 + Humanizer.OFF
+                      val dim = if (machine) 1f else 0.35f
+                      speedLabel.alpha = dim
+                      gapLabel.alpha = dim
+                      speedGroup.alpha = dim
+                      gapInput.alpha = dim
+                      gapInput.isEnabled = machine
+                      for (i in 0 until speedGroup.childCount) speedGroup.getChildAt(i).isEnabled = machine
+                  }
+                  styleGroup.setOnCheckedChangeListener { _, _ -> showMachineSettings() }
+                  showMachineSettings()
 
                   root.addView(button("3. Stop battery saver killing the app") {
                       val pm = getSystemService(android.os.PowerManager::class.java)
