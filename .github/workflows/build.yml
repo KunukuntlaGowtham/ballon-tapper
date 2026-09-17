@@ -619,7 +619,7 @@ jobs:
                       floatArrayOf(3f, 128f, 154f, 0.35f, 0.74f, 0.62f)
                   )
                   private val RING_HUE = floatArrayOf(213f, 3f, 51f, 133f)
-                  private const val SCALE = 8   // heavy downsampling = far less CPU/GPU per frame; balloons are big
+                  // SCALE moved to a runtime setting (detection quality). See `scale`.
               }
 
               // capture
@@ -684,6 +684,7 @@ jobs:
               private var enabledColours = booleanArrayOf(true, true, true, true)
               private var comboMode = false   // only blue & red, dead-centre, no misses
               private var coverAll = false    // tap every balloon non-stop, human timing kept
+              private var scale = 4           // detection downscale: smaller = sharper aim, heavier
               private var maxTaps = 6
               private var fingersHuman = 1
               private var fingersMachine = 2
@@ -766,6 +767,7 @@ jobs:
                   )
                   comboMode = p.getBoolean("combo", false)
                   coverAll = p.getBoolean("coverAll", false)
+                  scale = p.getInt("scale", 4).coerceIn(3, 8)
                   maxTaps = p.getInt("maxTaps", 6)
                   fingersHuman = p.getInt("fingersHuman", 1).coerceIn(1, 5)
                   fingersMachine = p.getInt("fingersMachine", 1).coerceIn(1, 5)
@@ -802,8 +804,8 @@ jobs:
                   screenW = size.x
                   screenH = size.y
 
-                  val w = screenW / SCALE
-                  val h = screenH / SCALE
+                  val w = screenW / scale
+                  val h = screenH / scale
                   val mpm = getSystemService(MediaProjectionManager::class.java)
                   val proj = mpm.getMediaProjection(code, data)
                   projection = proj
@@ -823,7 +825,7 @@ jobs:
                   val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
                   reader = r
                   virtualDisplay = proj.createVirtualDisplay(
-                      "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
+                      "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / scale),
                       DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler
                   )
               }
@@ -842,21 +844,21 @@ jobs:
                   if (size.x <= 0 || size.y <= 0) return
                   screenW = size.x
                   screenH = size.y
-                  val w = screenW / SCALE
-                  val h = screenH / SCALE
+                  val w = screenW / scale
+                  val h = screenH / scale
                   try {
                       val old = reader
                       val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
                       val vd = virtualDisplay
                       if (vd != null) {
-                          vd.resize(w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE))
+                          vd.resize(w, h, maxOf(1, resources.displayMetrics.densityDpi / scale))
                           vd.surface = r.surface
                           reader = r
                           try { old?.close() } catch (_: Throwable) {}
                       } else {
                           reader = r
                           virtualDisplay = proj.createVirtualDisplay(
-                              "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
+                              "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / scale),
                               DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler)
                           try { old?.close() } catch (_: Throwable) {}
                       }
@@ -1545,6 +1547,7 @@ jobs:
               private lateinit var fxCheck: CheckBox
               private lateinit var comboCheck: CheckBox
               private lateinit var coverCheck: CheckBox
+              private lateinit var qualityGroup: RadioGroup
               private lateinit var gapInput: EditText
               private lateinit var maxTaps: EditText
               private lateinit var skipTop: EditText
@@ -1596,6 +1599,17 @@ jobs:
                   root.addView(label("Fingers in machine / turbo mode (more = faster, heavier on the phone)"))
                   fingersMachine = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersMachine", 1).toString()) }
                   root.addView(fingersMachine)
+
+                  root.addView(label("Detection quality (sharper aim & better recognition = heavier)"))
+                  // radio id encodes the downscale: id = 300 + scale (smaller scale = sharper)
+                  val qualityOpts = listOf(3 to "Sharp - best aim, heaviest", 4 to "Balanced (recommended)",
+                      6 to "Light - faster, coarser", 8 to "Very light - lightest, roughest")
+                  qualityGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+                  qualityOpts.forEach { (sc, name) ->
+                      qualityGroup.addView(RadioButton(this).apply { text = name; id = 300 + sc })
+                  }
+                  qualityGroup.check(300 + prefs.getInt("scale", 4).coerceIn(3, 8))
+                  root.addView(qualityGroup)
 
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
                   skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 8).toString()) }
@@ -1684,6 +1698,7 @@ jobs:
                   ed.putBoolean("fx", fxCheck.isChecked)
                   ed.putBoolean("combo", comboCheck.isChecked)
                   ed.putBoolean("coverAll", coverCheck.isChecked)
+                  ed.putInt("scale", (qualityGroup.checkedRadioButtonId - 300).coerceIn(3, 8))
                   ed.putInt("gapMs", gapInput.text.toString().toIntOrNull()?.let { if (it <= 0) 0 else it.coerceIn(5, 2000) } ?: 0)
                   ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
                   ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 3))
