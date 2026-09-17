@@ -27,11 +27,11 @@ balloon and darts back — all things a real hand does. The speed you get comes
 from short gaps between bursts, not from a faster peak tap rate, so it clears
 more without tapping any less like a person.
 
-The human styles play with two thumbs, and when the screen floods near the end
-of a round the other fingers pile in — up to three (casual), four (focused) or
-five (rapid). The fingers tap at the same time but each keeps its own human rate,
-so a flood clears several times faster in wall-clock time without any finger
-tapping faster than a person could.
+While the overlay is running there are two floating buttons: the main
+START/STOP button, and a **⚡ TURBO** button. Tap TURBO in the last few seconds
+of a round to blitz the finale at full machine speed (a single fast finger,
+which stays stable), then tap it again to hand control back to the human style.
+Both buttons can be dragged anywhere on screen.
 
 The tap speed and fixed-gap settings only apply to the machine style; the human
 styles work out their own timings.

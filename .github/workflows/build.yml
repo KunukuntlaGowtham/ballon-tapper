@@ -636,6 +636,9 @@ jobs:
               @Volatile private var busy = false
               @Volatile private var busySince = 0L
               @Volatile private var busyLimitMs = 2500L
+              @Volatile private var turbo = false               // manual full-speed machine mode for the finale
+              private var turboBtn: TextView? = null
+              private var turboParams: WindowManager.LayoutParams? = null
               @Volatile private var nextScanAt = 0L
               private var loopStarted = false
 
@@ -686,6 +689,7 @@ jobs:
                   if (showFx && fxView == null) showDetectionView()
                   if (!showFx && fxView != null) { try { wm.removeView(fxView) } catch (_: Throwable) {}; fxView = null }
                   if (overlay == null) showOverlay()
+                  if (turboBtn == null) showTurboButton()
 
                   val code = intent?.getIntExtra("code", 0) ?: 0
                   val data: Intent? = if (Build.VERSION.SDK_INT >= 33)
@@ -844,7 +848,7 @@ jobs:
                   val img = reader?.acquireLatestImage() ?: return
                   val now = SystemClock.uptimeMillis()
                   val nowRel = (now - startedAt).toFloat()
-                  val human = humanizer.on
+                  val human = humanizer.on && !turbo   // TURBO button forces the fast machine path
                   if (human) { humanizer.tick(now - startedAt); humanizer.forgetOld(now) }
                   val reactMs = if (human) humanizer.reactionMs() else 0f
                   val resting = human && humanizer.restingAt(now)   // looking away, shifting grip, hesitating
@@ -983,12 +987,8 @@ jobs:
                       // one hand can only manage a few taps before it has to move and look again
                       val tapLimit = when {
                           resting -> 0
-                          human -> {
-                              // enough balloons for every finger in play, not just one thumb's worth
-                              val cap = if (frenzy) maxOf(maxTaps * 2, 16) else maxTaps
-                              val perFinger = humanizer.burstLimit() + if (frenzy) 1 else 0
-                              minOf(cap, humanizer.fingerCount(frenzy, normal.size) * perFinger)
-                          }
+                          turbo -> maxOf(maxTaps * 2, 12)
+                          human -> minOf(maxTaps, if (frenzy) humanizer.burstLimit() + 1 else humanizer.burstLimit())
                           frenzy -> maxOf(maxTaps * 2, 12)
                           else -> maxTaps
                       }
@@ -1064,67 +1064,59 @@ jobs:
                   }
                   busy = true
                   busySince = SystemClock.uptimeMillis()
-                  if (humanizer.on) {
-                      // two thumbs share the work; in a flood the rest of the fingers join in. Each finger
-                      // is its own hand travelling balloon to balloon at a human pace, and they run at the
-                      // same time, so throughput rises without any single finger tapping faster.
+                  if (human) {
+                      // one finger, travelling from balloon to balloon, pressing for an uneven moment each time
                       val density = resources.displayMetrics.density
-                      val rushNow = SystemClock.uptimeMillis() < frenzyUntil
-                      // never ask for more simultaneous fingers than the device can safely dispatch
-                      val strokeRoom = maxOf(1, minOf(TapService.maxSafeFingers(), 3))
-                      val fingers = maxOf(1, minOf(humanizer.fingerCount(rushNow, hits.size), strokeRoom))
-                      // hand each finger a contiguous slice of the screen, left to right, like real hands
-                      val ordered = hits.sortedBy { it.x }
-                      val n = ordered.size
-                      val lanes = Array(fingers) { ArrayList<PointF>() }
-                      ordered.forEachIndexed { idx, p -> lanes[minOf(fingers - 1, idx * fingers / maxOf(1, n))].add(p) }
-
-                      val taps = ArrayList<TapService.Tap>(hits.size + fingers * 2)
-                      var maxEnd = 0L
-                      for (f in 0 until fingers) {
-                          var from = humanizer.handAt(f)
-                          var at = humanizer.fingerStaggerMs() * f   // fingers don't come down in unison
-                          for (p in lanes[f]) {
-                              // sometimes a finger darts past a far balloon and corrects back onto it
-                              val over = humanizer.overshoot(from, p, density)
-                              if (over != null) {
-                                  at += humanizer.travelMs(from, over, density)
-                                  val h0 = maxOf(12L, humanizer.holdMs() / 2)
-                                  val d0 = humanizer.drift()
-                                  taps.add(TapService.Tap(over.x, over.y, at, h0, d0.x, d0.y))
-                                  at += h0
-                                  from = over
-                              }
-                              at += humanizer.travelMs(from, p, density)
-                              val hold = humanizer.holdMs()
-                              val d = humanizer.drift()
-                              taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
-                              at += hold
-                              // unsure it registered, tap the same balloon again
-                              if (humanizer.doubleTap()) {
-                                  at += humanizer.doubleGapMs()
-                                  val h2 = humanizer.holdMs()
-                                  val d2 = humanizer.drift()
-                                  taps.add(TapService.Tap(p.x, p.y, at, h2, d2.x, d2.y))
-                                  at += h2
-                              }
-                              from = p
+                      val taps = ArrayList<TapService.Tap>(hits.size + 4)
+                      var from = humanizer.handAt()
+                      var at = 0L
+                      for (p in hits) {
+                          // sometimes the thumb darts past a far balloon and corrects back onto it
+                          val over = humanizer.overshoot(from, p, density)
+                          if (over != null) {
+                              at += humanizer.travelMs(from, over, density)
+                              val h0 = maxOf(12L, humanizer.holdMs() / 2)
+                              val d0 = humanizer.drift()
+                              taps.add(TapService.Tap(over.x, over.y, at, h0, d0.x, d0.y))
+                              at += h0
+                              from = over
                           }
-                          if (lanes[f].isNotEmpty()) humanizer.handMovedTo(f, lanes[f].last())
-                          maxEnd = maxOf(maxEnd, at)
+                          at += humanizer.travelMs(from, p, density)
+                          val hold = humanizer.holdMs()
+                          val d = humanizer.drift()
+                          taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
+                          at += hold
+                          // unsure it registered, tap the same balloon again
+                          if (humanizer.doubleTap()) {
+                              at += humanizer.doubleGapMs()
+                              val h2 = humanizer.holdMs()
+                              val d2 = humanizer.drift()
+                              taps.add(TapService.Tap(p.x, p.y, at, h2, d2.x, d2.y))
+                              at += h2
+                          }
+                          from = p
                       }
-                      taps.sortBy { it.startMs }
+                      humanizer.handMovedTo(hits.last())
                       val settle = maxOf(humanizer.settleMs(), 30L)
-                      busyLimitMs = maxEnd + 2000L
+                      busyLimitMs = at + 2000L
                       tapper.tapTaps(taps) {
                           nextScanAt = SystemClock.uptimeMillis() + settle
                           busy = false
                       }
                   } else {
-                      val rush = SystemClock.uptimeMillis() < frenzyUntil
-                      val gap = if (rush && customGapMs == 0L) minOf(tapGapMs, 30L) else tapGapMs
-                      val hold = if (rush && customGapMs == 0L) minOf(tapHoldMs, 20L) else tapHoldMs
-                      val settle = if (rush) minOf(settleMs, 20L) else settleMs
+                      // machine path (also used by the TURBO button): one finger, fixed rhythm, but stable
+                      val rush = turbo || SystemClock.uptimeMillis() < frenzyUntil
+                      val gap = when {
+                          turbo -> 26L
+                          rush && customGapMs == 0L -> minOf(tapGapMs, 30L)
+                          else -> tapGapMs
+                      }
+                      val hold = when {
+                          turbo -> 18L
+                          rush && customGapMs == 0L -> minOf(tapHoldMs, 20L)
+                          else -> tapHoldMs
+                      }
+                      val settle = if (turbo) 16L else if (rush) minOf(settleMs, 20L) else settleMs
                       busyLimitMs = 2500L
                       tapper.tapMany(hits, gap, hold) {
                           nextScanAt = SystemClock.uptimeMillis() + settle
@@ -1186,8 +1178,9 @@ jobs:
                   val rush = SystemClock.uptimeMillis() < frenzyUntil
                   val txt = when {
                       captureLost -> "\u21BB RESUME"
-                      running -> "\u25A0 STOP" + (if (rush && !humanizer.on) "   \u26A1RUSH" else "") +
-                              (if (humanizer.on) "   \u00B7 ${humanizer.name}" else "") +
+                      running -> "\u25A0 STOP" +
+                              (if (turbo) "   \u26A1TURBO" else if (rush && !humanizer.on) "   \u26A1RUSH" else "") +
+                              (if (humanizer.on && !turbo) "   \u00B7 ${humanizer.name}" else "") +
                               "\n$totalTaps taps  \u00B7  $rate/s" +
                               "\nnext special: ${colourNames[nextSpecial]}"
                       else -> "\u25B6 START" + (if (totalTaps > 0) "\n$totalTaps taps" else "")
@@ -1202,6 +1195,60 @@ jobs:
                       overlay?.text = txt
                       overlay?.setBackgroundColor(bg)
                   }
+              }
+
+              private fun setTurboButton() {
+                  mainHandler.post {
+                      turboBtn?.text = if (turbo) "\u26A1 MACHINE" else "\u26A1 TURBO"
+                      turboBtn?.setBackgroundColor(
+                          if (turbo) Color.argb(220, 150, 0, 130) else Color.argb(200, 60, 60, 70))
+                  }
+              }
+
+              /** A second floating button. Tap it in the last few seconds to blitz the finale at machine
+               *  speed, tap again to hand control back to the human style. Draggable like the main one. */
+              @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+              private fun showTurboButton() {
+                  val tv = TextView(this).apply {
+                      text = "\u26A1 TURBO"
+                      textSize = 14f
+                      typeface = android.graphics.Typeface.DEFAULT_BOLD
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(Color.argb(200, 60, 60, 70))
+                      setPadding(36, 24, 36, 24)
+                  }
+                  val params = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 470 }
+
+                  var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var moved = false
+                  tv.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = e.rawX; downY = e.rawY; startX = params.x; startY = params.y; moved = false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - downX; val dy = e.rawY - downY
+                              if (abs(dx) > 15 || abs(dy) > 15) moved = true
+                              if (moved) {
+                                  params.x = startX + dx.toInt(); params.y = startY + dy.toInt()
+                                  try { wm.updateViewLayout(tv, params) } catch (_: Throwable) {}
+                              }
+                          }
+                          MotionEvent.ACTION_UP -> if (!moved) {
+                              turbo = !turbo
+                              busy = false            // switch paths on the next scan straight away
+                              setTurboButton()
+                              setButton()
+                          }
+                      }
+                      true
+                  }
+                  try { wm.addView(tv, params); turboBtn = tv; turboParams = params }
+                  catch (t: Throwable) { Log.e(TAG, "turbo button failed", t) }
               }
 
               private fun showDetectionView() {
@@ -1284,6 +1331,8 @@ jobs:
                   running = false
                   overlay?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
                   overlay = null
+                  turboBtn?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
+                  turboBtn = null
                   fxView?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
                   fxView = null
                   releaseCapture()
