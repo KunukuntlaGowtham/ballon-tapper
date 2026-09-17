@@ -960,8 +960,8 @@ jobs:
                           val big = maxOf(bwid, bhei)
                           val cx = sumX.toFloat() / n; val cy = sumY.toFloat() / n
 
-                          if (big <= 75 && aspect in 0.6f..1.66f && fill >= 0.5f) {
-                              // single balloon
+                          if (big <= 150 && aspect in 0.6f..1.66f && fill >= 0.5f) {
+                              // single balloon (cap is generous so large balloons stay one clean tap)
                               val blob = floatArrayOf(cx, cy, n.toFloat(), c.toFloat())
                               if (ringScore(cx, cy, (bwid + bhei) / 4f, c, w, h) >= 0.45f) specials.add(blob) else normal.add(blob)
                           } else if (fill >= 0.30f) {
