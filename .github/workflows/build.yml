@@ -702,6 +702,7 @@ jobs:
                           startCapture(code, data)
                           captureLost = false
                           setButton()
+                          setTurboButton()
                       } catch (t: Throwable) {
                           Log.e(TAG, "capture start failed", t)
                           captureLost = true
@@ -1217,10 +1218,20 @@ jobs:
               }
 
               private fun setTurboButton() {
+                  val txt = when {
+                      captureLost -> "\u21BB RESUME"
+                      running && turbo -> "\u26A1 MACHINE \u2713"
+                      running -> "\u26A1 MACHINE"
+                      else -> "\u26A1 MACHINE + START"
+                  }
+                  val bg = when {
+                      captureLost -> Color.argb(215, 180, 90, 0)
+                      running && turbo -> Color.argb(220, 150, 0, 130)
+                      else -> Color.argb(200, 60, 60, 70)
+                  }
                   mainHandler.post {
-                      turboBtn?.text = if (turbo) "\u26A1 MACHINE" else "\u26A1 TURBO"
-                      turboBtn?.setBackgroundColor(
-                          if (turbo) Color.argb(220, 150, 0, 130) else Color.argb(200, 60, 60, 70))
+                      turboBtn?.text = txt
+                      turboBtn?.setBackgroundColor(bg)
                   }
               }
 
@@ -1229,7 +1240,7 @@ jobs:
               @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
               private fun showTurboButton() {
                   val tv = TextView(this).apply {
-                      text = "\u26A1 TURBO"
+                      text = "\u26A1 MACHINE + START"
                       textSize = 14f
                       typeface = android.graphics.Typeface.DEFAULT_BOLD
                       setTextColor(Color.WHITE)
@@ -1241,7 +1252,7 @@ jobs:
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                       PixelFormat.TRANSLUCENT
-                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 470 }
+                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 520 }
 
                   var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var moved = false
                   tv.setOnTouchListener { _, e ->
@@ -1258,16 +1269,27 @@ jobs:
                               }
                           }
                           MotionEvent.ACTION_UP -> if (!moved) {
-                              turbo = !turbo
-                              busy = false            // switch paths on the next scan straight away
+                              when {
+                                  captureLost -> resumeCapture()          // this button resumes too
+                                  !running -> { running = true; turbo = true; busy = false }   // MACHINE + START in one tap
+                                  else -> { turbo = !turbo; busy = false }  // toggle machine while running
+                              }
                               setTurboButton()
                               setButton()
                           }
                       }
                       true
                   }
-                  try { wm.addView(tv, params); turboBtn = tv; turboParams = params }
+                  try { wm.addView(tv, params); turboBtn = tv; turboParams = params; setTurboButton() }
                   catch (t: Throwable) { Log.e(TAG, "turbo button failed", t) }
+              }
+
+              /** Re-ask Android for screen capture after it stopped, then carry on where we left off. */
+              private fun resumeCapture() {
+                  running = true
+                  startActivity(Intent(this, MainActivity::class.java)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                      .putExtra("resume", true))
               }
 
               private fun showDetectionView() {
@@ -1323,18 +1345,14 @@ jobs:
                           MotionEvent.ACTION_UP -> if (!moved) {
                               when {
                                   SystemClock.uptimeMillis() - downTime > 800 -> stopSelf()   // long-press = quit
-                                  captureLost -> {
-                                      // screen capture was stopped by Android: ask for it again, then carry on
-                                      running = true
-                                      startActivity(Intent(this, MainActivity::class.java)
-                                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                                          .putExtra("resume", true))
-                                  }
+                                  captureLost -> resumeCapture()
                                   else -> {
                                       running = !running
+                                      if (running) turbo = false      // START is always the human style
+                                      else { turbo = false; fxView?.setTargets(FloatArray(0)) }
                                       busy = false
-                                      if (!running) fxView?.setTargets(FloatArray(0))
                                       setButton()
+                                      setTurboButton()
                                   }
                               }
                           }

@@ -27,11 +27,18 @@ balloon and darts back — all things a real hand does. The speed you get comes
 from short gaps between bursts, not from a faster peak tap rate, so it clears
 more without tapping any less like a person.
 
-While the overlay is running there are two floating buttons: the main
-START/STOP button, and a **⚡ TURBO** button. Human play uses two thumbs; tap
-TURBO in the last few seconds of a round to blitz the finale at full machine
-speed with four fingers, then tap it again to hand control back to the human
-style. Both buttons can be dragged anywhere on screen.
+While the overlay is running there are two separate floating buttons you can
+drag anywhere:
+
+- **▶ START / ■ STOP** — starts and stops the tapper in the human style you
+  picked. Long-press to quit.
+- **⚡ MACHINE + START** — one tap goes to full machine speed (four fingers),
+  starting the tapper too if it is not already running. Tap it again to hand
+  control back to the human style. In the final flood, just hit this button.
+
+If Android stops the screen capture during play (it can do this when the game
+shows an ad or a full-screen/secure screen), either button shows **↻ RESUME** —
+one tap re-grants capture and play continues from where it left off.
 
 The tap speed and fixed-gap settings only apply to the machine style; the human
 styles work out their own timings.
