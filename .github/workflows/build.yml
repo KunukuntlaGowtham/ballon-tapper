@@ -750,7 +750,7 @@ jobs:
                   )
                   maxTaps = p.getInt("maxTaps", 6)
                   fingersHuman = p.getInt("fingersHuman", 1).coerceIn(1, 5)
-                  fingersMachine = p.getInt("fingersMachine", 2).coerceIn(1, 5)
+                  fingersMachine = p.getInt("fingersMachine", 1).coerceIn(1, 5)
                   skipTopPct = p.getInt("skipTop", 8)
                   showFx = p.getBoolean("fx", false)   // off by default: the live rings cost extra every frame
                   // taps go out one after another; tapGapMs = pause between taps
@@ -1527,7 +1527,7 @@ jobs:
                   root.addView(fingersHuman)
 
                   root.addView(label("Fingers in machine / turbo mode (more = faster, heavier on the phone)"))
-                  fingersMachine = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersMachine", 2).toString()) }
+                  fingersMachine = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersMachine", 1).toString()) }
                   root.addView(fingersMachine)
 
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
@@ -1621,7 +1621,7 @@ jobs:
                   ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 30) ?: 6)
                       .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
                       .putInt("fingersHuman", fingersHuman.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 1)
-                      .putInt("fingersMachine", fingersMachine.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 2)
+                      .putInt("fingersMachine", fingersMachine.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 1)
                       .apply()
 
                   if (!Settings.canDrawOverlays(this)) { toast("Do step 1 first"); return }
