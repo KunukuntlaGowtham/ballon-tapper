@@ -145,6 +145,7 @@ jobs:
                   const val CASUAL = 1     // one thumb, no hurry
                   const val FOCUSED = 2    // playing properly
                   const val RAPID = 3      // flat out, near the top of what a hand manages
+                  const val MAX_FINGERS = 5
 
                   /** The dials that make one level feel different from the next. */
                   private class Style(
@@ -180,7 +181,7 @@ jobs:
 
               private val rnd = Random(System.nanoTime())
               private val sight = ArrayList<FloatArray>()      // x, y, firstSeen, lastSeen
-              private val hand = PointF(-1f, -1f)
+              private val hands = Array(MAX_FINGERS) { PointF(-1f, -1f) }
               private var pauseUntil = 0L
               private var nextPauseAt = 0L
               private var tiredness = 0f                       // 0 = fresh, 1 = worn out
@@ -302,8 +303,24 @@ jobs:
                   return PointF(dx, dy)
               }
 
-              fun handAt(): PointF = PointF(hand.x, hand.y)
-              fun handMovedTo(p: PointF) { hand.set(p.x, p.y) }
+              fun handAt(): PointF = PointF(hands[0].x, hands[0].y)
+              fun handMovedTo(p: PointF) { hands[0].set(p.x, p.y) }
+              fun handAt(i: Int): PointF = PointF(hands[i].x, hands[i].y)
+              fun handMovedTo(i: Int, p: PointF) { hands[i].set(p.x, p.y) }
+
+              /**
+               * Two thumbs in normal play; when the screen floods near the end, the other fingers
+               * pile in. Each finger still taps at its own human rate — more fingers just means more
+               * balloons at once, the way a real panic-mash does.
+               */
+              fun fingerCount(frenzy: Boolean, balloons: Int): Int {
+                  if (!frenzy) return 2
+                  val cap = when (level) { RAPID -> 5 ; FOCUSED -> 4 ; else -> 3 }
+                  return (2 + balloons / 6).coerceIn(2, cap)
+              }
+
+              /** Fingers never land in perfect unison; each comes down a little apart from the rest. */
+              fun fingerStaggerMs(): Long = gauss(26f, 12f).coerceIn(4f, 70f).toLong()
 
               // --- the hand over time ------------------------------------------------
 
@@ -957,7 +974,12 @@ jobs:
                       // one hand can only manage a few taps before it has to move and look again
                       val tapLimit = when {
                           resting -> 0
-                          human -> minOf(maxTaps, if (frenzy) humanizer.burstLimit() + 1 else humanizer.burstLimit())
+                          human -> {
+                              // enough balloons for every finger in play, not just one thumb's worth
+                              val cap = if (frenzy) maxOf(maxTaps * 2, 16) else maxTaps
+                              val perFinger = humanizer.burstLimit() + if (frenzy) 1 else 0
+                              minOf(cap, humanizer.fingerCount(frenzy, normal.size) * perFinger)
+                          }
                           frenzy -> maxOf(maxTaps * 2, 12)
                           else -> maxTaps
                       }
@@ -1034,40 +1056,55 @@ jobs:
                   busy = true
                   busySince = SystemClock.uptimeMillis()
                   if (humanizer.on) {
-                      // one finger, travelling from balloon to balloon, pressing for an uneven moment each time
+                      // two thumbs share the work; in a flood the rest of the fingers join in. Each finger
+                      // is its own hand travelling balloon to balloon at a human pace, and they run at the
+                      // same time, so throughput rises without any single finger tapping faster.
                       val density = resources.displayMetrics.density
-                      val taps = ArrayList<TapService.Tap>(hits.size + 4)
-                      var from = humanizer.handAt()
-                      var at = 0L
-                      for (p in hits) {
-                          // sometimes the thumb darts past a far balloon and corrects back onto it
-                          val over = humanizer.overshoot(from, p, density)
-                          if (over != null) {
-                              at += humanizer.travelMs(from, over, density)
-                              val h0 = maxOf(12L, humanizer.holdMs() / 2)
-                              val d0 = humanizer.drift()
-                              taps.add(TapService.Tap(over.x, over.y, at, h0, d0.x, d0.y))
-                              at += h0
-                              from = over
+                      val rushNow = SystemClock.uptimeMillis() < frenzyUntil
+                      val fingers = maxOf(1, humanizer.fingerCount(rushNow, hits.size))
+                      // hand each finger a contiguous slice of the screen, left to right, like real hands
+                      val ordered = hits.sortedBy { it.x }
+                      val n = ordered.size
+                      val lanes = Array(fingers) { ArrayList<PointF>() }
+                      ordered.forEachIndexed { idx, p -> lanes[minOf(fingers - 1, idx * fingers / maxOf(1, n))].add(p) }
+
+                      val taps = ArrayList<TapService.Tap>(hits.size + fingers * 2)
+                      var maxEnd = 0L
+                      for (f in 0 until fingers) {
+                          var from = humanizer.handAt(f)
+                          var at = humanizer.fingerStaggerMs() * f   // fingers don't come down in unison
+                          for (p in lanes[f]) {
+                              // sometimes a finger darts past a far balloon and corrects back onto it
+                              val over = humanizer.overshoot(from, p, density)
+                              if (over != null) {
+                                  at += humanizer.travelMs(from, over, density)
+                                  val h0 = maxOf(12L, humanizer.holdMs() / 2)
+                                  val d0 = humanizer.drift()
+                                  taps.add(TapService.Tap(over.x, over.y, at, h0, d0.x, d0.y))
+                                  at += h0
+                                  from = over
+                              }
+                              at += humanizer.travelMs(from, p, density)
+                              val hold = humanizer.holdMs()
+                              val d = humanizer.drift()
+                              taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
+                              at += hold
+                              // unsure it registered, tap the same balloon again
+                              if (humanizer.doubleTap()) {
+                                  at += humanizer.doubleGapMs()
+                                  val h2 = humanizer.holdMs()
+                                  val d2 = humanizer.drift()
+                                  taps.add(TapService.Tap(p.x, p.y, at, h2, d2.x, d2.y))
+                                  at += h2
+                              }
+                              from = p
                           }
-                          at += humanizer.travelMs(from, p, density)
-                          val hold = humanizer.holdMs()
-                          val d = humanizer.drift()
-                          taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
-                          at += hold
-                          // unsure it registered, tap the same balloon again
-                          if (humanizer.doubleTap()) {
-                              at += humanizer.doubleGapMs()
-                              val h2 = humanizer.holdMs()
-                              val d2 = humanizer.drift()
-                              taps.add(TapService.Tap(p.x, p.y, at, h2, d2.x, d2.y))
-                              at += h2
-                          }
-                          from = p
+                          if (lanes[f].isNotEmpty()) humanizer.handMovedTo(f, lanes[f].last())
+                          maxEnd = maxOf(maxEnd, at)
                       }
-                      humanizer.handMovedTo(hits.last())
+                      taps.sortBy { it.startMs }
                       val settle = humanizer.settleMs()
-                      busyLimitMs = at + 2000L
+                      busyLimitMs = maxEnd + 2000L
                       tapper.tapTaps(taps) {
                           nextScanAt = SystemClock.uptimeMillis() + settle
                           busy = false
