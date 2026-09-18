@@ -1251,7 +1251,7 @@ jobs:
                   }
                   taps.sortBy { it.startMs }
                   val settle = when {
-                      coverAll -> 30L
+                      coverAll -> 22L
                       human -> maxOf(humanizer.settleMs(), 30L)
                       turbo -> 16L
                       rush -> minOf(settleMs, 20L)
