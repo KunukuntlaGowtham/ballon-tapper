@@ -1093,7 +1093,7 @@ jobs:
                       // one hand can only manage a few taps before it has to move and look again
                       val tapLimit = when {
                           resting -> 0
-                          coverAll -> maxOf(maxTaps, minOf(normal.size, 10))   // lighter sweeps, repeated
+                          coverAll -> maxOf(maxTaps, minOf(normal.size, 24))   // sweep everything on screen
                           turbo -> maxOf(maxTaps * 2, 16)                       // 4 fingers, machine speed
                           human -> {                                            // 2 thumbs at a human pace
                               val perThumb = humanizer.burstLimit() + if (frenzy) 1 else 0
@@ -1103,7 +1103,7 @@ jobs:
                           else -> maxOf(maxTaps, 12)                            // machine style, calm 4 fingers
                       }
                       val minGuard = if (frenzy) (if (human) 40f else 32f) else 50f
-                      recentTaps.removeAll { nowRel - it[2] > (if (frenzy) (if (human) 200f else 180f) else tapCooldownMs) }
+                      recentTaps.removeAll { nowRel - it[2] > (if (coverAll) 120f else if (frenzy) (if (human) 200f else 180f) else tapCooldownMs) }
                       val ages = HashMap<FloatArray, Float>()
                       if (human && !resting) {
                           // the eyes take in the whole screen, then the hand reaches for what is nearest
@@ -1188,7 +1188,7 @@ jobs:
                   // cover-all runs on the fast machine path (human per-tap timing is too slow to
                   // catch everything); it keeps only the light on-balloon scatter from the aim step
                   val fastMode = coverAll || !human
-                  val want = if (coverAll) fingersMachine else if (human) fingersHuman else fingersMachine
+                  val want = if (coverAll) fingersMachine else if (human) fingersHuman else fingersMachine   // cover-all honours your machine-finger count
                   val fingers = maxOf(1, minOf(want, TapService.maxSafeFingers()))
                   val ordered = hits.sortedBy { it.x }
                   val n = ordered.size
@@ -1251,7 +1251,7 @@ jobs:
                   }
                   taps.sortBy { it.startMs }
                   val settle = when {
-                      coverAll -> 45L
+                      coverAll -> 30L
                       human -> maxOf(humanizer.settleMs(), 30L)
                       turbo -> 16L
                       rush -> minOf(settleMs, 20L)
