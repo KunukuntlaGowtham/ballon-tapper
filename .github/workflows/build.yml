@@ -112,274 +112,6 @@ jobs:
               android:canPerformGestures="true" />
           ENDOFFILE
           mkdir -p app/src/main/java/com/example/balloontapper
-          cat > app/src/main/java/com/example/balloontapper/Humanizer.kt <<'ENDOFFILE'
-          package com.example.balloontapper
-
-          import android.graphics.PointF
-          import kotlin.math.PI
-          import kotlin.math.abs
-          import kotlin.math.cos
-          import kotlin.math.hypot
-          import kotlin.math.ln
-          import kotlin.math.sin
-          import kotlin.math.sqrt
-          import kotlin.random.Random
-
-          /**
-           * Makes the tapper play like a person instead of a machine.
-           *
-           * A person needs a moment to notice a balloon, aims somewhere on it rather than dead centre,
-           * moves one finger from balloon to balloon, taps at an uneven rhythm, fumbles one now and then,
-           * misses a balloon that was right there, glances away for a beat and slows down as the hand tires.
-           * Everything here is the same idea: take a number the machine would keep exactly, and stop keeping
-           * it exactly.
-           *
-           * The three levels are one person at three speeds. None of them goes past what a thumb can really
-           * do: the quickest works out at roughly ten taps a second in a burst, and it pays for that speed
-           * with looser aim, the way a real hand does.
-           */
-          class Humanizer {
-
-              companion object {
-                  const val OFF = 0        // the old machine behaviour: instant, perfect, relentless
-                  const val CASUAL = 1     // one thumb, no hurry
-                  const val FOCUSED = 2    // playing properly
-                  const val RAPID = 3      // flat out, near the top of what a hand manages
-                  const val MAX_FINGERS = 5
-
-                  /** The dials that make one level feel different from the next. */
-                  private class Style(
-                      val react: Float, val reactSd: Float,       // how long before a balloon registers
-                      val hold: Float, val holdSd: Float,         // how long the finger stays down
-                      val travel: Float, val perDp: Float,        // moving the finger to the next balloon
-                      val settle: Float, val settleSd: Float,     // the beat between bursts
-                      val burst: Int, val burstSpread: Int,       // taps before the eyes go looking again
-                      val aim: Float, val fumble: Float, val ignore: Float,
-                      val pauseEvery: Float, val pause: Float,    // glancing away, shifting grip
-                      val tire: Float                             // how much a long session slows it down
-                  )
-
-                  private val STYLES = arrayOf(
-                      // Per-tap timing stays where a real thumb is; the throughput gain comes from the
-                      // shorter settle between bursts (dead time, not something a tap analyser can see).
-                      // casual: about four taps a second in a burst, easy pace between them
-                      Style(200f, 58f, 70f, 22f, 58f, 0.24f, 95f, 40f, 4, 2, 0.38f, 0.040f, 0.050f, 8000f, 320f, 0.32f),
-                      // focused: six or seven a second, steady aim, brief glances away
-                      Style(130f, 33f, 50f, 14f, 40f, 0.16f, 55f, 22f, 5, 3, 0.30f, 0.025f, 0.025f, 13000f, 240f, 0.22f),
-                      // rapid: around ten a second in a burst, barely stops, looser aim to pay for it
-                      Style(95f, 25f, 38f, 11f, 28f, 0.10f, 34f, 14f, 6, 4, 0.36f, 0.050f, 0.010f, 18000f, 180f, 0.13f)
-                  )
-              }
-
-              var level = FOCUSED
-              val on: Boolean get() = level != OFF
-              val name: String get() = when (level) {
-                  RAPID -> "rapid" ; FOCUSED -> "focused" ; CASUAL -> "casual" ; else -> "machine"
-              }
-
-              private val style: Style get() = STYLES[level.coerceIn(CASUAL, RAPID) - 1]
-
-              private val rnd = Random(System.nanoTime())
-              private val sight = ArrayList<FloatArray>()      // x, y, firstSeen, lastSeen
-              private val hands = Array(MAX_FINGERS) { PointF(-1f, -1f) }
-              private var pauseUntil = 0L
-              private var nextPauseAt = 0L
-              private var tiredness = 0f                       // 0 = fresh, 1 = worn out
-              private var startedMs = -1L                      // when this hand first started playing
-
-              /** Bell-curve random value. Real timings and real aim scatter like this, not evenly. */
-              fun gauss(mean: Float, sd: Float): Float {
-                  val u1 = maxOf(1e-6f, rnd.nextFloat())
-                  val u2 = rnd.nextFloat()
-                  val z = (sqrt(-2f * ln(u1)) * cos(2f * PI.toFloat() * u2)).coerceIn(-2.5f, 2.5f)
-                  return mean + sd * z
-              }
-
-              fun chance(p: Float) = rnd.nextFloat() < p
-
-              // --- noticing a balloon ------------------------------------------------
-
-              /** How long a balloon has to be on screen before a person reacts to it. */
-              fun reactionMs(): Float {
-                  val s = style
-                  return gauss(s.react, s.reactSd).coerceIn(s.react * 0.55f, s.react * 2f)
-              }
-
-              /**
-               * Remembers where balloons were, so we know how long this one has been in view.
-               * Returns the age in ms of the remembered balloon nearest to (x, y), 0 if it is new.
-               */
-              fun ageOf(x: Float, y: Float, now: Long): Float {
-                  var best: FloatArray? = null
-                  var bestD = 150f
-                  for (s in sight) {
-                      val d = hypot(s[0] - x, s[1] - y)
-                      if (d < bestD) { bestD = d; best = s }
-                  }
-                  val b = best
-                  if (b == null) {
-                      sight.add(floatArrayOf(x, y, now.toFloat(), now.toFloat()))
-                      return 0f
-                  }
-                  b[0] = x; b[1] = y; b[3] = now.toFloat()
-                  return now - b[2]
-              }
-
-              fun forgetOld(now: Long) {
-                  sight.removeAll { now - it[3] > 600f }
-                  if (sight.size > 400) sight.subList(0, sight.size - 400).clear()
-              }
-
-              // --- aiming ------------------------------------------------------------
-
-              /** A thumb lands somewhere on the balloon, and every so often just beside it. */
-              fun aim(x: Float, y: Float, radius: Float): PointF {
-                  val s = style
-                  val r = maxOf(12f, radius)
-                  if (chance(s.fumble)) {
-                      val t = rnd.nextFloat() * 2f * PI.toFloat()
-                      val off = r * gauss(1.25f, 0.15f)
-                      return PointF(x + cos(t) * off, y + sin(t) * off)     // fumbled: lands just off the balloon
-                  }
-                  return PointF(x + gauss(0f, r * s.aim), y + gauss(0f, r * s.aim))
-              }
-
-              /**
-               * Aim that scatters a little (so it isn't robotically dead-centre) but is clamped to stay
-               * on the balloon, so it never misses. Used by combo mode for blue & red.
-               */
-              fun aimWithin(x: Float, y: Float, radius: Float): PointF {
-                  val r = maxOf(12f, radius)
-                  var dx = gauss(0f, r * 0.30f)
-                  var dy = gauss(0f, r * 0.30f)
-                  val d = hypot(dx, dy)
-                  val maxD = r * 0.65f
-                  if (d > maxD && d > 0f) { dx = dx / d * maxD; dy = dy / d * maxD }
-                  return PointF(x + dx, y + dy)
-              }
-
-              /** Attention slips: a balloon right there sometimes just doesn't get tapped. */
-              fun ignores() = chance(style.ignore)
-
-              /** Nobody predicts a moving balloon perfectly, so lead it by a wrong amount. */
-              fun leadNoise(): Float = gauss(1f, 0.25f).coerceIn(0.4f, 1.6f)
-
-              // --- rhythm ------------------------------------------------------------
-
-              /** How many balloons get tapped before the eyes go looking again. */
-              fun burstLimit(): Int = style.burst + rnd.nextInt(style.burstSpread)
-
-              /** How long the finger stays down. */
-              fun holdMs(): Long {
-                  val s = style
-                  return gauss(s.hold, s.holdSd).coerceIn(s.hold * 0.5f, s.hold * 2.4f).toLong()
-              }
-
-              /** Time to move the finger to the next balloon: further away takes longer (Fitts, roughly). */
-              fun travelMs(from: PointF, to: PointF, density: Float): Long {
-                  val s = style
-                  val dist = if (from.x < 0f) 0f else hypot(to.x - from.x, to.y - from.y) / maxOf(1f, density)
-                  return (gauss(s.travel + dist * s.perDp, s.travel * 0.3f) * tiredFactor() * warmup())
-                      .coerceIn(s.travel * 0.5f, 900f).toLong()
-              }
-
-              /**
-               * On a long reach the thumb sometimes overshoots and darts back to land. Returns a point
-               * slightly past the target to tap first, or null for a normal single move. The correction
-               * back to the real target follows as the next tap.
-               */
-              fun overshoot(from: PointF, to: PointF, density: Float): PointF? {
-                  if (from.x < 0f) return null
-                  val distDp = hypot(to.x - from.x, to.y - from.y) / maxOf(1f, density)
-                  if (distDp < 90f || !chance(0.12f)) return null
-                  val over = gauss(0.12f, 0.04f).coerceIn(0.05f, 0.25f)
-                  return PointF(to.x + (to.x - from.x) * over, to.y + (to.y - from.y) * over)
-              }
-
-              /** A person unsure a tap registered taps the same spot twice in quick succession. */
-              fun doubleTap(): Boolean = chance(if (level == RAPID) 0.05f else 0.03f)
-
-              /** Gap before a quick second tap on the same balloon. */
-              fun doubleGapMs(): Long = gauss(70f, 18f).coerceIn(45f, 120f).toLong()
-
-              /** Pause after a burst, while the eyes pick the next balloons. */
-              fun settleMs(): Long {
-                  val s = style
-                  return (gauss(s.settle, s.settleSd) * tiredFactor()).coerceIn(s.settle * 0.4f, s.settle * 4f).toLong()
-              }
-
-              /** Fingers slide a little while they press; a perfectly still touch is a giveaway. */
-              fun drift(): PointF {
-                  var dx = gauss(0f, 2.6f)
-                  var dy = gauss(0f, 2.6f)
-                  if (abs(dx) < 1f) dx = if (dx < 0f) -1f else 1f
-                  if (abs(dy) < 1f) dy = if (dy < 0f) -1f else 1f
-                  return PointF(dx, dy)
-              }
-
-              fun handAt(): PointF = PointF(hands[0].x, hands[0].y)
-              fun handMovedTo(p: PointF) { hands[0].set(p.x, p.y) }
-              fun handAt(i: Int): PointF = PointF(hands[i].x, hands[i].y)
-              fun handMovedTo(i: Int, p: PointF) { hands[i].set(p.x, p.y) }
-
-              /**
-               * Two thumbs in normal play; when the screen floods near the end, the other fingers
-               * pile in. Each finger still taps at its own human rate — more fingers just means more
-               * balloons at once, the way a real panic-mash does.
-               */
-              fun fingerCount(frenzy: Boolean, balloons: Int): Int {
-                  if (!frenzy) return 2
-                  // capped low on purpose: many simultaneous touch strokes can destabilise the input
-                  // system on some phones, and two-to-three fingers already clears a flood fast
-                  val cap = when (level) { RAPID -> 3 ; FOCUSED -> 3 ; else -> 2 }
-                  return (2 + balloons / 10).coerceIn(2, cap)
-              }
-
-              /** Fingers never land in perfect unison; each comes down a little apart from the rest. */
-              fun fingerStaggerMs(): Long = gauss(26f, 12f).coerceIn(4f, 70f).toLong()
-
-              // --- the hand over time ------------------------------------------------
-
-              private fun tiredFactor(): Float = 1f + tiredness * style.tire
-
-              /** The first several seconds are a touch slower, the way a hand eases into a game. */
-              private fun warmup(): Float {
-                  if (startedMs < 0L) return 1f
-                  val since = lastTick - startedMs
-                  return if (since >= 6000L) 1f else 1.35f - 0.35f * (since / 6000f)
-              }
-              private var lastTick = 0L
-
-              /** Slows down over a long session, with sharper patches and sloppier ones along the way. */
-              fun tick(playedMs: Long) {
-                  if (startedMs < 0L) startedMs = playedMs
-                  lastTick = playedMs
-                  val stint = (playedMs / 600000f).coerceIn(0f, 1f)          // ten minutes is a full stint
-                  val wave = (sin(playedMs / 23000f) + 1f) / 2f
-                  tiredness = (stint * 0.7f + wave * 0.3f).coerceIn(0f, 1f)
-              }
-
-              /** Every so often a person glances away, shifts grip, or simply hesitates. */
-              fun restingAt(now: Long): Boolean {
-                  val s = style
-                  if (now < pauseUntil) return true
-                  if (nextPauseAt == 0L) { nextPauseAt = now + pauseSpacing(); return false }
-                  if (now >= nextPauseAt) {
-                      val len = if (chance(0.12f)) gauss(s.pause * 3f, s.pause) else gauss(s.pause, s.pause * 0.35f)
-                      pauseUntil = now + len.coerceIn(120f, 2800f).toLong()
-                      nextPauseAt = pauseUntil + pauseSpacing()
-                      return true
-                  }
-                  return false
-              }
-
-              private fun pauseSpacing(): Long {
-                  val s = style
-                  return gauss(s.pauseEvery, s.pauseEvery * 0.3f).coerceIn(2000f, 30000f).toLong()
-              }
-          }
-          ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
           cat > app/src/main/java/com/example/balloontapper/TapService.kt <<'ENDOFFILE'
           package com.example.balloontapper
 
@@ -390,194 +122,40 @@ jobs:
           import android.graphics.PointF
           import android.view.accessibility.AccessibilityEvent
 
-          /** Performs the actual taps. Must be enabled in Settings > Accessibility. */
+          /** Taps every given point at the SAME time (one multi-touch gesture), then done(). */
           class TapService : AccessibilityService() {
 
-              companion object {
-                  @Volatile var instance: TapService? = null
-
-                  /** Fingers we can dispatch at once without straining the input system. */
-                  fun maxSafeFingers(): Int =
-                      maxOf(1, minOf(GestureDescription.getMaxStrokeCount(), 4))
-              }
+              companion object { @Volatile var instance: TapService? = null }
 
               override fun onServiceConnected() { instance = this }
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
               override fun onInterrupt() {}
+              override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
 
-              override fun onUnbind(intent: Intent?): Boolean {
-                  instance = null
-                  return super.onUnbind(intent)
-              }
-
-              /** One tap as a person makes it: where, when, how long, and how far the finger slides. */
-              class Tap(val x: Float, val y: Float, val startMs: Long, val holdMs: Long, val dx: Float, val dy: Float)
-
-              /** Plays a sequence of taps with their own timings, then calls done(). */
-              fun tapTaps(taps: List<Tap>, done: () -> Unit) {
-                  if (taps.isEmpty()) { done(); return }
-                  // Stay well under the device's stroke limit and keep each gesture small: flooding the
-                  // input system with big, overlapping multi-touch gestures can crash system_server and
-                  // soft-reboot the phone, so cap it conservatively.
-                  val maxStrokes = maxOf(1, minOf(GestureDescription.getMaxStrokeCount(), 4))
-                  val chunks = taps.chunked(maxStrokes)
-                  fun send(i: Int) {
-                      if (i >= chunks.size) { done(); return }
-                      val chunk = chunks[i]
-                      val base = chunk.first().startMs
-                      val ok = try {
-                          val builder = GestureDescription.Builder()
-                          for (t in chunk) {
-                              val x = maxOf(0f, t.x); val y = maxOf(0f, t.y)
-                              val path = Path().apply {
-                                  moveTo(x, y)
-                                  lineTo(maxOf(0f, x + t.dx), maxOf(0f, y + t.dy))
-                              }
-                              builder.addStroke(GestureDescription.StrokeDescription(
-                                  path, maxOf(0L, t.startMs - base), maxOf(1L, t.holdMs)))
-                          }
-                          dispatchGesture(builder.build(), object : GestureResultCallback() {
-                              override fun onCompleted(g: GestureDescription?) = send(i + 1)
-                              override fun onCancelled(g: GestureDescription?) = send(i + 1)
-                          }, null)
-                      } catch (e: Exception) {
-                          android.util.Log.e("BalloonTapper", "human tap error", e)
-                          false
+              fun tapAll(points: List<PointF>, holdMs: Long, done: () -> Unit) {
+                  if (points.isEmpty()) { done(); return }
+                  val n = minOf(points.size, maxOf(1, GestureDescription.getMaxStrokeCount()))
+                  val ok = try {
+                      val b = GestureDescription.Builder()
+                      for (i in 0 until n) {
+                          val p = points[i]
+                          val path = Path().apply { moveTo(maxOf(0f, p.x), maxOf(0f, p.y)) }
+                          b.addStroke(GestureDescription.StrokeDescription(path, 0L, maxOf(1L, holdMs)))  // all at t=0
                       }
-                      if (!ok) done()
+                      dispatchGesture(b.build(), object : GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) = done()
+                          override fun onCancelled(g: GestureDescription?) = done()
+                      }, null)
+                  } catch (e: Exception) {
+                      android.util.Log.e("BalloonTapper", "tap error", e); false
                   }
-                  send(0)
-              }
-
-              /** Taps points one after another, spaced by gapMs, then calls done(). */
-              fun tapMany(points: List<PointF>, gapMs: Long, holdMs: Long, done: () -> Unit) {
-                  val fingers = 1
-                  val maxStrokes = GestureDescription.getMaxStrokeCount()
-                  val batch = if (maxStrokes >= fingers) maxStrokes - maxStrokes % fingers else maxOf(1, maxStrokes)
-                  val perGroup = minOf(fingers, batch)
-                  val chunks = points.chunked(batch)
-                  fun send(i: Int) {
-                      if (i >= chunks.size) { done(); return }
-                      val ok = try {
-                          val builder = GestureDescription.Builder()
-                          chunks[i].forEachIndexed { k, pt ->
-                              val path = Path().apply { moveTo(maxOf(0f, pt.x), maxOf(0f, pt.y)) }
-                              val groupStart = (k / perGroup) * gapMs   // one tap at a time
-                              builder.addStroke(GestureDescription.StrokeDescription(path, groupStart, holdMs))
-                          }
-                          dispatchGesture(builder.build(), object : GestureResultCallback() {
-                              override fun onCompleted(g: GestureDescription?) = send(i + 1)
-                              override fun onCancelled(g: GestureDescription?) = send(i + 1)
-                          }, null)
-                      } catch (e: Exception) {
-                          android.util.Log.e("BalloonTapper", "tap error", e)
-                          false
-                      }
-                      if (!ok) done()
-                  }
-                  if (chunks.isEmpty()) done() else send(0)
+                  if (!ok) done()
               }
           }
           ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
-          cat > app/src/main/java/com/example/balloontapper/DetectionView.kt <<'ENDOFFILE'
-          package com.example.balloontapper
-
-          import android.content.Context
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.DashPathEffect
-          import android.graphics.Paint
-          import android.graphics.PointF
-          import android.os.SystemClock
-          import android.view.View
-
-          /**
-           * See-through layer that shows what the tapper sees: rings on detected balloons,
-           * numbered badges on special balloons and a burst on every tap.
-           * Colours are white and magenta on purpose, so the detector never mistakes them for balloons.
-           */
-          class DetectionView(ctx: Context) : View(ctx) {
-
-              // x, y, radius, kind  (kind 0 = normal, 1..4 = special order, +10 = the special that's next)
-              @Volatile private var targets = FloatArray(0)
-              private val bursts = ArrayList<FloatArray>()   // x, y, bornAt
-              private val lock = Any()
-
-              private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.argb(200, 255, 255, 255)
-              }
-              private val special = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  style = Paint.Style.STROKE; strokeWidth = 7f; color = Color.WHITE
-                  pathEffect = DashPathEffect(floatArrayOf(22f, 12f), 0f)
-              }
-              private val next = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  style = Paint.Style.STROKE; strokeWidth = 10f; color = Color.rgb(255, 0, 220)
-              }
-              private val burst = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  style = Paint.Style.STROKE; strokeWidth = 8f; color = Color.rgb(255, 0, 220)
-              }
-              private val badge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  color = Color.WHITE; textSize = 46f; isFakeBoldText = true; textAlign = Paint.Align.CENTER
-                  setShadowLayer(8f, 0f, 0f, Color.BLACK)
-              }
-
-              fun setTargets(t: FloatArray) {
-                  targets = t
-                  postInvalidateOnAnimation()
-              }
-
-              fun addTaps(points: List<PointF>) {
-                  val now = SystemClock.uptimeMillis().toFloat()
-                  synchronized(lock) {
-                      for (p in points) bursts.add(floatArrayOf(p.x, p.y, now))
-                      if (bursts.size > 200) bursts.subList(0, bursts.size - 200).clear()
-                  }
-                  postInvalidateOnAnimation()
-              }
-
-              override fun onDraw(canvas: Canvas) {
-                  super.onDraw(canvas)
-                  val t = targets
-                  var i = 0
-                  while (i + 3 < t.size) {
-                      val x = t[i]; val y = t[i + 1]; val r = t[i + 2]; val kind = t[i + 3].toInt()
-                      when {
-                          kind == 0 -> canvas.drawCircle(x, y, r, ring)
-                          kind > 10 -> {
-                              canvas.drawCircle(x, y, r + 14f, next)
-                              canvas.drawText((kind - 10).toString(), x, y - r - 26f, badge)
-                          }
-                          else -> {
-                              canvas.drawCircle(x, y, r + 10f, special)
-                              canvas.drawText(kind.toString(), x, y - r - 22f, badge)
-                          }
-                      }
-                      i += 4
-                  }
-
-                  val now = SystemClock.uptimeMillis().toFloat()
-                  var alive = false
-                  synchronized(lock) {
-                      val it = bursts.iterator()
-                      while (it.hasNext()) {
-                          val b = it.next()
-                          val age = (now - b[2]) / 280f
-                          if (age >= 1f) { it.remove(); continue }
-                          alive = true
-                          burst.alpha = ((1f - age) * 255).toInt()
-                          canvas.drawCircle(b[0], b[1], 18f + age * 60f, burst)
-                      }
-                  }
-                  if (alive) postInvalidateOnAnimation()
-              }
-          }
-          ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
           cat > app/src/main/java/com/example/balloontapper/CaptureService.kt <<'ENDOFFILE'
           package com.example.balloontapper
 
-          import android.annotation.SuppressLint
           import android.app.Notification
           import android.app.NotificationChannel
           import android.app.NotificationManager
@@ -600,17 +178,13 @@ jobs:
           import android.view.WindowManager
           import android.widget.TextView
           import kotlin.math.abs
-          import kotlin.math.cos
-          import kotlin.math.hypot
-          import kotlin.math.sin
           import kotlin.math.sqrt
 
-          /** Watches the screen, finds balloons and taps them. Built to keep running no matter what. */
+          /** Finds every balloon of the chosen colours and taps them all at once, over and over. */
           class CaptureService : Service() {
 
               companion object {
                   private const val TAG = "BalloonTapper"
-                  // colour, hueMin, hueMax, satMin, satMax, valMin (tuned on Google Store Playground screenshots)
                   private val RULES = arrayOf(
                       floatArrayOf(0f, 203f, 222f, 0.45f, 1.00f, 0.55f),
                       floatArrayOf(1f, 0f, 14f, 0.60f, 1.00f, 0.75f),
@@ -618,11 +192,9 @@ jobs:
                       floatArrayOf(2f, 44f, 64f, 0.30f, 1.00f, 0.65f),
                       floatArrayOf(3f, 128f, 154f, 0.35f, 0.74f, 0.62f)
                   )
-                  private val RING_HUE = floatArrayOf(213f, 3f, 51f, 133f)
-                  // SCALE moved to a runtime setting (detection quality). See `scale`.
+                  private const val SCALE = 5
               }
 
-              // capture
               private var projection: MediaProjection? = null
               private var virtualDisplay: VirtualDisplay? = null
               private var reader: ImageReader? = null
@@ -633,68 +205,33 @@ jobs:
               private var screenW = 0
               private var screenH = 0
 
-              // overlay
               private var overlay: TextView? = null
-              private var fxView: DetectionView? = null
-              private var showFx = true
-
-              // stats for the floating button
-              private var totalTaps = 0
-              private val tapLog = ArrayDeque<LongArray>()       // time, count
-              private var lastUiAt = 0L
               private var overlayParams: WindowManager.LayoutParams? = null
-              @Volatile private var captureLost = false
+              private var totalTaps = 0
 
-              // state
+              @Volatile private var captureLost = false
               @Volatile private var running = false
               @Volatile private var busy = false
               @Volatile private var busySince = 0L
-              @Volatile private var busyLimitMs = 2500L
-              private var lastSizeCheck = 0L
-              @Volatile private var turbo = false               // manual full-speed machine mode for the finale
-              private var turboBtn: TextView? = null
-              private var turboParams: WindowManager.LayoutParams? = null
               @Volatile private var nextScanAt = 0L
               private var loopStarted = false
+              private var lastSizeCheck = 0L
+              private var lastResumeAt = 0L
 
-              // reusable buffers (no garbage per frame = no stutter)
               private var bw = 0
               private var bh = 0
               private var label = ByteArray(0)
-              private var hue = FloatArray(0)
-              private var sat = FloatArray(0)
               private var seen = BooleanArray(0)
               private var stack = IntArray(0)
               private var members = IntArray(0)
               private val hs = FloatArray(2)
 
-              // tap memory, aiming and special order
-              private val startedAt = SystemClock.uptimeMillis()
-              private val recentTaps = ArrayList<FloatArray>()     // x, y, time
-              private var prevBlobs = ArrayList<FloatArray>()      // x, y
-              private var prevFrameAt = 0L
-              private val tapCooldownMs = 300f
-              private val leadMs = 60f
-              private var nextSpecial = 0
-              private var frenzyUntil = 0L                         // rush mode when the screen floods with balloons
-              private var specialLastSeen = 0L
-              private var pendingSpecial: FloatArray? = null       // x, y, colour, time
-
-              // settings
               private var enabledColours = booleanArrayOf(true, true, true, true)
-              private var comboMode = false   // only blue & red, dead-centre, no misses
-              private var coverAll = false    // tap every balloon non-stop, human timing kept
-              private var scale = 4           // detection downscale: smaller = sharper aim, heavier
-              private var maxTaps = 6
-              private var fingersHuman = 1
-              private var fingersMachine = 2
+              private var maxAtOnce = 6      // how many balloons to tap simultaneously
               private var skipTopPct = 8
-              private var tapGapMs = 6L
-              private var tapHoldMs = 6L
-              private var settleMs = 30L
-              private var loopMs = 12L
-              private var customGapMs = 0L
-              private val humanizer = Humanizer()
+              private val holdMs = 30L
+              private var settleMs = 25L
+              private var loopMs = 16L
 
               override fun onBind(intent: Intent?): IBinder? = null
 
@@ -706,10 +243,7 @@ jobs:
                       wm = getSystemService(WindowManager::class.java)
                   }
                   loadSettings()
-                  if (showFx && fxView == null) showDetectionView()
-                  if (!showFx && fxView != null) { try { wm.removeView(fxView) } catch (_: Throwable) {}; fxView = null }
                   if (overlay == null) showOverlay()
-                  if (turboBtn == null) showTurboButton()
 
                   val code = intent?.getIntExtra("code", 0) ?: 0
                   val data: Intent? = if (Build.VERSION.SDK_INT >= 33)
@@ -718,28 +252,14 @@ jobs:
 
                   if (data != null) {
                       releaseCapture()
-                      try {
-                          startCapture(code, data)
-                          captureLost = false
-                          running = true
-                          saveRunning(true)
-                          setButton()
-                          setTurboButton()
-                      } catch (t: Throwable) {
-                          Log.e(TAG, "capture start failed", t)
-                          captureLost = true
-                          setButton()
-                      }
+                      try { startCapture(code, data); captureLost = false; running = true; saveRunning(true) }
+                      catch (t: Throwable) { Log.e(TAG, "capture start failed", t); captureLost = true }
+                      setButton()
                   } else if (projection == null) {
-                      // Android restarted the service (memory/CPU pressure) without the capture token.
-                      // Don't strand the user on a dead START: if we had been running, show RESUME so a
-                      // single tap re-grants capture and continues.
                       if (loadRunning()) { running = true; captureLost = true; mainHandler.post { autoResume() } }
                       setButton()
-                      setTurboButton()
                   }
                   if (!loopStarted) { loopStarted = true; handler.post(loop) }
-                  // START_REDELIVER_INTENT so the system re-hands us the capture intent if it can
                   return START_REDELIVER_INTENT
               }
 
@@ -749,670 +269,20 @@ jobs:
                   val n = Notification.Builder(this, "tapper")
                       .setContentTitle("Balloon Tapper is running")
                       .setContentText("Long-press the floating button to quit")
-                      .setSmallIcon(android.R.drawable.ic_media_play)
-                      .setOngoing(true)
-                      .build()
+                      .setSmallIcon(android.R.drawable.ic_media_play).setOngoing(true).build()
                   try {
                       if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
                       else startForeground(1, n)
-                  } catch (t: Throwable) {
-                      Log.e(TAG, "foreground failed", t)
-                  }
+                  } catch (t: Throwable) { Log.e(TAG, "foreground failed", t) }
               }
 
               private fun loadSettings() {
                   val p = getSharedPreferences("cfg", MODE_PRIVATE)
                   enabledColours = booleanArrayOf(
-                      p.getBoolean("blue", true), p.getBoolean("red", true), p.getBoolean("yellow", true), p.getBoolean("green", true)
-                  )
-                  comboMode = p.getBoolean("combo", false)
-                  coverAll = p.getBoolean("coverAll", false)
-                  scale = p.getInt("scale", 4).coerceIn(3, 8)
-                  maxTaps = p.getInt("maxTaps", 6)
-                  fingersHuman = p.getInt("fingersHuman", 1).coerceIn(1, 5)
-                  fingersMachine = p.getInt("fingersMachine", 1).coerceIn(1, 5)
-                  skipTopPct = p.getInt("skipTop", 8)
-                  showFx = p.getBoolean("fx", false)   // off by default: the live rings cost extra every frame
-                  // taps go out one after another; tapGapMs = pause between taps
-                  when (p.getInt("speed", 1)) {
-                      0 -> { tapGapMs = 120L; tapHoldMs = 40L; settleMs = 80L; loopMs = 25L }
-                      1 -> { tapGapMs = 70L; tapHoldMs = 30L; settleMs = 60L; loopMs = 20L }
-                      else -> { tapGapMs = 40L; tapHoldMs = 25L; settleMs = 40L; loopMs = 15L }
-                  }
-                  // optional fixed gap chosen by the user (0 = use the speed mode)
-                  customGapMs = p.getInt("gapMs", 0).toLong()
-                  if (customGapMs > 0) { tapGapMs = customGapMs; tapHoldMs = minOf(tapHoldMs, maxOf(4L, customGapMs - 1)) }
-                  // play style: the human levels work out their own timings and ignore the speed above
-                  humanizer.level = p.getInt("human", Humanizer.FOCUSED).coerceIn(Humanizer.OFF, Humanizer.RAPID)
-                  // human styles pace themselves through settle/travel; keep the scan loop tight so
-                  // the wait between bursts is the human pause, not loop overhead on top of it
-                  if (humanizer.on) loopMs = 16L
-              }
-
-              /** The real screen size right now (changes when a game hides the bars or rotates). */
-              private fun currentScreenSize(): Point {
-                  val size = Point()
-                  if (Build.VERSION.SDK_INT >= 30) {
-                      val b = wm.maximumWindowMetrics.bounds
-                      size.set(b.width(), b.height())
-                  } else @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(size)
-                  return size
-              }
-
-              private fun startCapture(code: Int, data: Intent) {
-                  val size = currentScreenSize()
-                  screenW = size.x
-                  screenH = size.y
-
-                  val w = screenW / scale
-                  val h = screenH / scale
-                  val mpm = getSystemService(MediaProjectionManager::class.java)
-                  val proj = mpm.getMediaProjection(code, data)
-                  projection = proj
-                  proj.registerCallback(object : MediaProjection.Callback() {
-                      override fun onStop() {
-                          // Android stopped screen capture (heavy load, an ad, a secure screen, etc.).
-                          // Don't sit waiting for a tap: re-request capture straight away and carry on.
-                          Log.w(TAG, "projection stopped")
-                          captureLost = true
-                          releaseCapture()
-                          setButton()
-                          setTurboButton()
-                          if (running || loadRunning()) mainHandler.post { autoResume() }
-                      }
-                  }, handler)
-
-                  val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-                  reader = r
-                  virtualDisplay = proj.createVirtualDisplay(
-                      "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / scale),
-                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler
-                  )
-              }
-
-              /**
-               * Keep the capture matched to the live screen. Games often hide the status bar or flip to
-               * landscape when they go fullscreen; the mirror was sized once at START, so after that the
-               * frames come out letterboxed and the wrong size and nothing is detected. When the screen
-               * size changes we resize the virtual display and swap in a matching reader — no new capture
-               * permission needed, because the projection itself is still alive.
-               */
-              private fun syncCaptureSize() {
-                  val proj = projection ?: return
-                  val size = currentScreenSize()
-                  if (size.x == screenW && size.y == screenH) return
-                  if (size.x <= 0 || size.y <= 0) return
-                  screenW = size.x
-                  screenH = size.y
-                  val w = screenW / scale
-                  val h = screenH / scale
-                  try {
-                      val old = reader
-                      val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-                      val vd = virtualDisplay
-                      if (vd != null) {
-                          vd.resize(w, h, maxOf(1, resources.displayMetrics.densityDpi / scale))
-                          vd.surface = r.surface
-                          reader = r
-                          try { old?.close() } catch (_: Throwable) {}
-                      } else {
-                          reader = r
-                          virtualDisplay = proj.createVirtualDisplay(
-                              "tapper", w, h, maxOf(1, resources.displayMetrics.densityDpi / scale),
-                              DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler)
-                          try { old?.close() } catch (_: Throwable) {}
-                      }
-                      ensureBuffers(w, h)
-                      Log.i(TAG, "capture resized to $screenW x $screenH")
-                  } catch (t: Throwable) {
-                      Log.e(TAG, "capture resize failed", t)
-                  }
-              }
-
-              private fun releaseCapture() {
-                  try { virtualDisplay?.release() } catch (_: Throwable) {}
-                  try { reader?.close() } catch (_: Throwable) {}
-                  val p = projection
-                  projection = null
-                  virtualDisplay = null
-                  reader = null
-                  try { p?.stop() } catch (_: Throwable) {}
-              }
-
-              /** The main loop. Whatever happens inside, it always schedules itself again. */
-              private val loop = object : Runnable {
-                  override fun run() {
-                      try {
-                          val now = SystemClock.uptimeMillis()
-                          // watchdog: if a tap batch never reported back, don't stay stuck
-                          if (busy && now - busySince > busyLimitMs) busy = false
-                          // follow the game if it changes screen size (fullscreen / rotation)
-                          if (running && projection != null && now - lastSizeCheck > 400) {
-                              lastSizeCheck = now; syncCaptureSize()
-                          }
-                          if (running && !busy && now >= nextScanAt && reader != null) scanAndTap()
-                          else reader?.acquireLatestImage()?.close()   // keep the latest frame fresh
-                      } catch (t: Throwable) {
-                          busy = false
-                          Log.e(TAG, "loop error", t)
-                      } finally {
-                          handler.postDelayed(this, loopMs)
-                      }
-                  }
-              }
-
-              private fun ensureBuffers(w: Int, h: Int) {
-                  if (w == bw && h == bh) return
-                  bw = w; bh = h
-                  val n = w * h
-                  label = ByteArray(n); hue = FloatArray(n); sat = FloatArray(n)
-                  seen = BooleanArray(n); stack = IntArray(n); members = IntArray(n)
-              }
-
-              private fun colourMatch(r: Int, g: Int, b: Int): Int {
-                  val mx = maxOf(r, maxOf(g, b)); val mn = minOf(r, minOf(g, b)); val d = mx - mn
-                  if (mx == 0 || d == 0) { hs[0] = 0f; hs[1] = 0f; return -1 }
-                  val s = d.toFloat() / mx
-                  // Background is near-grey/white (low saturation). Below the ring threshold there is
-                  // nothing to match and nothing to score, so skip the hue math entirely.
-                  if (s < 0.20f) { hs[0] = 0f; hs[1] = s; return -1 }
-                  var h = when (mx) {
-                      r -> 60f * (g - b) / d
-                      g -> 60f * (b - r) / d + 120f
-                      else -> 60f * (r - g) / d + 240f
-                  }
-                  if (h < 0) h += 360f
-                  hs[0] = h; hs[1] = s
-                  // Saturated enough to matter for ring scoring, but below every rule's minimum, so no
-                  // balloon colour can match: skip the rule loop.
-                  if (s < 0.30f) return -1
-                  val v = mx / 255f
-                  for (rule in RULES) {
-                      if (h >= rule[1] && h <= rule[2] && s >= rule[3] && s <= rule[4] && v >= rule[5]) return rule[0].toInt()
-                  }
-                  return -1
-              }
-
-              private fun hueDiff(a: Float, b: Float): Float {
-                  val d = abs(a - b) % 360f
-                  return minOf(d, 360f - d)
-              }
-
-              private fun scanAndTap() {
-                  val img = reader?.acquireLatestImage() ?: return
-                  val now = SystemClock.uptimeMillis()
-                  val nowRel = (now - startedAt).toFloat()
-                  val human = humanizer.on && !turbo   // TURBO button forces the fast machine path
-                  if (human) { humanizer.tick(now - startedAt); humanizer.forgetOld(now) }
-                  val reactMs = if (human) humanizer.reactionMs() else 0f
-                  val resting = human && !coverAll && humanizer.restingAt(now)   // breaks off in cover-all
-                  val hits = ArrayList<PointF>()
-                  try {
-                      val plane = img.planes[0]
-                      val buf = plane.buffer
-                      val rowStride = plane.rowStride
-                      val px = plane.pixelStride
-                      val w = img.width
-                      val h = img.height
-                      val limit = buf.limit()
-                      ensureBuffers(w, h)
-                      val sx = screenW.toFloat() / w
-                      val sy = screenH.toFloat() / h
-                      val top = h * skipTopPct / 100
-
-                      // 1. colour label for every pixel below the ignored top strip
-                      if (top > 0) {
-                          val end = minOf(top * w, label.size)
-                          java.util.Arrays.fill(label, 0, end, (-1).toByte())
-                          java.util.Arrays.fill(hue, 0, end, 0f)
-                          java.util.Arrays.fill(sat, 0, end, 0f)
-                      }
-                      for (y in top until h) {
-                          val row = y * rowStride
-                          val kRow = y * w
-                          for (x in 0 until w) {
-                              val i = row + x * px
-                              val k = kRow + x
-                              if (i + 2 >= limit) { label[k] = (-1).toByte(); hue[k] = 0f; sat[k] = 0f; continue }
-                              val c = colourMatch(buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff)
-                              hue[k] = hs[0]; sat[k] = hs[1]
-                              label[k] = c.toByte()
-                          }
-                      }
-                      java.util.Arrays.fill(seen, false)
-
-                      // 2. blobs
-                      val normal = ArrayList<FloatArray>()     // cx, cy, size, colour (scaled px)
-                      val specials = ArrayList<FloatArray>()
-                      val total = w * h
-                      for (start in 0 until total) {
-                          val c = label[start].toInt()
-                          if (c < 0 || seen[start]) continue
-                          var sp = 0; stack[sp++] = start; seen[start] = true
-                          var n = 0; var sumX = 0L; var sumY = 0L
-                          var minX = w; var maxX = 0; var minY = h; var maxY = 0
-                          while (sp > 0) {
-                              val idx = stack[--sp]; val x = idx % w; val y = idx / w
-                              members[n++] = idx; sumX += x; sumY += y
-                              if (x < minX) minX = x
-                              if (x > maxX) maxX = x
-                              if (y < minY) minY = y
-                              if (y > maxY) maxY = y
-                              if (x + 1 < w && label[idx + 1].toInt() == c && !seen[idx + 1]) { seen[idx + 1] = true; stack[sp++] = idx + 1 }
-                              if (x > 0 && label[idx - 1].toInt() == c && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
-                              if (y + 1 < h && label[idx + w].toInt() == c && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
-                              if (y > 0 && label[idx - w].toInt() == c && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
-                          }
-                          if (n < 16 || minY <= top) continue
-                          val bwid = maxX - minX + 1; val bhei = maxY - minY + 1
-                          val fill = n.toFloat() / (bwid * bhei)
-                          val aspect = bwid.toFloat() / bhei
-                          val big = maxOf(bwid, bhei)
-                          val cx = sumX.toFloat() / n; val cy = sumY.toFloat() / n
-
-                          if (big <= 150 && aspect in 0.6f..1.66f && fill >= 0.5f) {
-                              // single balloon (cap is generous so large balloons stay one clean tap)
-                              val blob = floatArrayOf(cx, cy, n.toFloat(), c.toFloat())
-                              if (ringScore(cx, cy, (bwid + bhei) / 4f, c, w, h) >= 0.45f) specials.add(blob) else normal.add(blob)
-                          } else if (fill >= 0.30f) {
-                              // crowd of touching balloons: tap the middle of each filled grid cell
-                              val cell = 18
-                              val cols = bwid / cell + 1; val rows = bhei / cell + 1
-                              val cnt = IntArray(cols * rows); val gx = LongArray(cols * rows); val gy = LongArray(cols * rows)
-                              for (m in 0 until n) {
-                                  val idx = members[m]; val x = idx % w; val y = idx / w
-                                  val g = ((y - minY) / cell) * cols + (x - minX) / cell
-                                  cnt[g]++; gx[g] += x.toLong(); gy[g] += y.toLong()
-                              }
-                              for (g in 0 until cols * rows) {
-                                  if (cnt[g] >= cell * cell * 0.40f)
-                                      normal.add(floatArrayOf(gx[g].toFloat() / cnt[g], gy[g].toFloat() / cnt[g], cnt[g].toFloat(), c.toFloat()))
-                              }
-                          }
-                      }
-
-                      // 3. aiming helpers
-                      val dt = (now - prevFrameAt).coerceAtLeast(1L).toFloat()
-                      recentTaps.removeAll { nowRel - it[2] > tapCooldownMs }
-                      val current = ArrayList<FloatArray>(normal.size + specials.size)
-                      for (bl in normal) current.add(floatArrayOf((bl[0] + 0.5f) * sx, (bl[1] + 0.5f) * sy))
-                      for (bl in specials) current.add(floatArrayOf((bl[0] + 0.5f) * sx, (bl[1] + 0.5f) * sy))
-                      fun aim(bl: FloatArray): PointF {
-                          val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          var tx = bx; var ty = by
-                          if (dt < 250f && prevBlobs.isNotEmpty()) {
-                              var best: FloatArray? = null; var bestD = 120f
-                              for (pb in prevBlobs) { val d = hypot(pb[0] - bx, pb[1] - by); if (d < bestD) { bestD = d; best = pb } }
-                              if (best != null) {
-                                  // a person leads a rising balloon by roughly the right amount, never exactly
-                                  val ahead = if (human) (leadMs + hits.size * 130f) * humanizer.leadNoise()
-                                              else leadMs + hits.size * tapGapMs
-                                  tx += ((bx - best[0]) / dt).coerceIn(-1.5f, 1.5f) * ahead
-                                  ty += ((by - best[1]) / dt).coerceIn(-1.5f, 1.5f) * ahead
-                              }
-                          }
-                          val ac = bl[3].toInt()
-                          if (coverAll || (comboMode && (ac == 0 || ac == 1))) {
-                              // blue & red: land somewhere on the balloon, never off it
-                              val p = humanizer.aimWithin(tx, ty, sqrt(bl[2] / 3.14f) * sx)
-                              tx = p.x; ty = p.y
-                          } else if (human) {
-                              val p = humanizer.aim(tx, ty, sqrt(bl[2] / 3.14f) * sx)
-                              tx = p.x; ty = p.y
-                          }
-                          return PointF(tx.coerceIn(1f, screenW - 2f), ty.coerceIn(1f, screenH - 2f))
-                      }
-
-                      // 4. special ringed balloons: blue -> red -> yellow -> green
-                      if (specials.isNotEmpty()) specialLastSeen = now
-                      else if (now - specialLastSeen > 3000) { nextSpecial = 0; pendingSpecial = null }
-                      val pend = pendingSpecial
-                      if (pend != null && nowRel - pend[3] > 150f) {
-                          val still = specials.any {
-                              it[3].toInt() == pend[2].toInt() && hypot((it[0] + 0.5f) * sx - pend[0], (it[1] + 0.5f) * sy - pend[1]) < 140f
-                          }
-                          pendingSpecial = null
-                          if (!still) nextSpecial = (pend[2].toInt() + 1) % 4
-                      }
-                      if (pendingSpecial == null && !resting) {
-                          val target = specials.filter { it[3].toInt() == nextSpecial }.maxByOrNull { it[2] }
-                          if (target != null) {
-                              val noticed = !human ||
-                                  humanizer.ageOf((target[0] + 0.5f) * sx, (target[1] + 0.5f) * sy, now) >= reactMs
-                              val p = aim(target)
-                              if (noticed && !onOverlay(p.x, p.y)) {
-                                  hits.add(p)
-                                  pendingSpecial = floatArrayOf(p.x, p.y, nextSpecial.toFloat(), nowRel)
-                              }
-                          }
-                      }
-
-                      // 5. normal balloons. When the screen floods, switch to rush mode for a moment.
-                      if (normal.size >= 12) frenzyUntil = now + 1500
-                      val frenzy = now < frenzyUntil
-                      // one hand can only manage a few taps before it has to move and look again
-                      val tapLimit = when {
-                          resting -> 0
-                          coverAll -> maxOf(maxTaps, minOf(normal.size, 24))   // sweep everything on screen
-                          turbo -> maxOf(maxTaps * 2, 16)                       // 4 fingers, machine speed
-                          human -> {                                            // 2 thumbs at a human pace
-                              val perThumb = humanizer.burstLimit() + if (frenzy) 1 else 0
-                              minOf(maxOf(maxTaps, 10), 2 * perThumb)
-                          }
-                          frenzy -> maxOf(maxTaps * 2, 16)                       // machine style, flooded
-                          else -> maxOf(maxTaps, 12)                            // machine style, calm 4 fingers
-                      }
-                      val minGuard = if (frenzy) (if (human) 40f else 32f) else 50f
-                      recentTaps.removeAll { nowRel - it[2] > (if (coverAll) 120f else if (frenzy) (if (human) 200f else 180f) else tapCooldownMs) }
-                      val ages = HashMap<FloatArray, Float>()
-                      if (human && !resting) {
-                          // the eyes take in the whole screen, then the hand reaches for what is nearest
-                          // it, with half an eye on what is about to escape off the top
-                          val hand = humanizer.handAt()
-                          val order = HashMap<FloatArray, Float>(normal.size * 2)
-                          for (bl in normal) {
-                              val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                              ages[bl] = humanizer.ageOf(bx, by, now)
-                              val reach = if (hand.x < 0f) 0f else hypot(hand.x - bx, hand.y - by)
-                              order[bl] = by * 0.55f + reach * 0.45f + humanizer.gauss(0f, 70f)
-                          }
-                          normal.sortBy { order[it] ?: 0f }
-                      } else if (!human) {
-                          // balloons closest to escaping off the top go first, then bigger ones
-                          normal.sortWith(compareBy<FloatArray> { it[1] }.thenByDescending { it[2] })
-                      }
-                      if (comboMode) {
-                          // blue & red get first pick of the tap budget, others still get popped after
-                          normal.sortBy { val c = it[3].toInt(); if (c == 0 || c == 1) 0 else 1 }
-                      }
-                      for (bl in normal) {
-                          if (hits.size >= tapLimit) break
-                          val col = bl[3].toInt()
-                          if (!enabledColours[col]) continue
-                          val priority = coverAll || (comboMode && (col == 0 || col == 1))   // never skip these
-                          val bx = (bl[0] + 0.5f) * sx; val by = (bl[1] + 0.5f) * sy
-                          if (human && !priority) {
-                              if ((ages[bl] ?: 0f) < reactMs) continue   // the eyes haven't caught it yet
-                              if (humanizer.ignores()) continue          // looked straight past it
-                          }
-                          if (!coverAll) {
-                              // normal modes space taps out; cover-all hits every balloon every scan
-                              val guard = maxOf(sqrt(bl[2] / 3.14f) * sx * 0.7f, minGuard)
-                              var blocked = false
-                              for (t in recentTaps) if (hypot(t[0] - bx, t[1] - by) < guard) { blocked = true; break }
-                              if (blocked) continue
-                          }
-                          val p = aim(bl)
-                          if (onOverlay(p.x, p.y)) continue
-                          hits.add(p)
-                          recentTaps.add(floatArrayOf(bx, by, nowRel))
-                      }
-                      prevBlobs = current
-                      prevFrameAt = now
-                      onScreen = normal.size + specials.size   // for the live stats HUD
-
-                      // live detection view (about 30 updates a second)
-                      val fx = fxView
-                      if (fx != null && now - lastUiAt >= 33) {
-                          lastUiAt = now
-                          val arr = FloatArray((normal.size + specials.size) * 4)
-                          var o = 0
-                          for (bl in normal) {
-                              if (!enabledColours[bl[3].toInt()]) continue
-                              arr[o++] = (bl[0] + 0.5f) * sx; arr[o++] = (bl[1] + 0.5f) * sy
-                              arr[o++] = minOf(sqrt(bl[2] / 3.14f) * sx, 140f); arr[o++] = 0f
-                          }
-                          for (bl in specials) {
-                              val c = bl[3].toInt()
-                              arr[o++] = (bl[0] + 0.5f) * sx; arr[o++] = (bl[1] + 0.5f) * sy
-                              arr[o++] = minOf(sqrt(bl[2] / 3.14f) * sx, 140f)
-                              arr[o++] = (c + 1 + if (c == nextSpecial) 10 else 0).toFloat()
-                          }
-                          fx.setTargets(arr.copyOf(o))
-                      }
-                  } finally {
-                      try { img.close() } catch (_: Throwable) {}
-                  }
-
-                  updateStats(hits.size)
-                  if (hits.isEmpty()) return
-                  fxView?.addTaps(hits)
-                  val tapper = TapService.instance
-                  if (tapper == null) {
-                      mainHandler.post { overlay?.text = "TURN ON TAP SERVICE\nin Accessibility settings" }
-                      return
-                  }
-                  busy = true
-                  busySince = SystemClock.uptimeMillis()
-                  // Two thumbs for human play, four fingers for machine/turbo. Each finger gets a
-                  // vertical slice of the screen and its own timeline; gestures stay small (at most a
-                  // handful of strokes) so the input system is never flooded.
-                  val density = resources.displayMetrics.density
-                  // cover-all runs on the fast machine path (human per-tap timing is too slow to
-                  // catch everything); it keeps only the light on-balloon scatter from the aim step
-                  val fastMode = coverAll || !human
-                  val want = if (coverAll) fingersMachine else if (human) fingersHuman else fingersMachine   // cover-all honours your machine-finger count
-                  val fingers = maxOf(1, minOf(want, TapService.maxSafeFingers()))
-                  val ordered = hits.sortedBy { it.x }
-                  val n = ordered.size
-                  val lanes = Array(fingers) { ArrayList<PointF>() }
-                  ordered.forEachIndexed { idx, p -> lanes[minOf(fingers - 1, idx * fingers / maxOf(1, n))].add(p) }
-
-                  val rush = turbo || coverAll || SystemClock.uptimeMillis() < frenzyUntil
-                  val mGap = when {
-                      coverAll -> 22L
-                      turbo -> 26L
-                      rush && customGapMs == 0L -> minOf(tapGapMs, 30L)
-                      else -> tapGapMs
-                  }
-                  val mHold = when {
-                      coverAll -> 16L
-                      turbo -> 18L
-                      rush && customGapMs == 0L -> minOf(tapHoldMs, 20L)
-                      else -> tapHoldMs
-                  }
-
-                  val taps = ArrayList<TapService.Tap>(hits.size + fingers * 2)
-                  var maxEnd = 0L
-                  for (f in 0 until fingers) {
-                      var from = if (!fastMode) humanizer.handAt(f) else PointF(-1f, -1f)
-                      var at = if (!fastMode) humanizer.fingerStaggerMs() * f else f * 5L
-                      for (p in lanes[f]) {
-                          if (!fastMode) {
-                              // sometimes a thumb darts past a far balloon and corrects back onto it
-                              val over = humanizer.overshoot(from, p, density)
-                              if (over != null && !onOverlay(over.x, over.y)) {
-                                  at += humanizer.travelMs(from, over, density)
-                                  val h0 = maxOf(12L, humanizer.holdMs() / 2)
-                                  val d0 = humanizer.drift()
-                                  taps.add(TapService.Tap(over.x, over.y, at, h0, d0.x, d0.y))
-                                  at += h0
-                                  from = over
-                              }
-                              at += humanizer.travelMs(from, p, density)
-                              val hold = humanizer.holdMs()
-                              val d = humanizer.drift()
-                              taps.add(TapService.Tap(p.x, p.y, at, hold, d.x, d.y))
-                              at += hold
-                              if (humanizer.doubleTap() && !onOverlay(p.x, p.y)) {
-                                  at += humanizer.doubleGapMs()
-                                  val h2 = humanizer.holdMs()
-                                  val d2 = humanizer.drift()
-                                  taps.add(TapService.Tap(p.x, p.y, at, h2, d2.x, d2.y))
-                                  at += h2
-                              }
-                          } else {
-                              // machine / turbo finger: plain fast taps, no flourishes
-                              at += mGap
-                              taps.add(TapService.Tap(p.x, p.y, at, mHold, 0f, 0f))
-                              at += mHold
-                          }
-                          from = p
-                      }
-                      if (!fastMode && lanes[f].isNotEmpty()) humanizer.handMovedTo(f, lanes[f].last())
-                      maxEnd = maxOf(maxEnd, at)
-                  }
-                  taps.sortBy { it.startMs }
-                  val settle = when {
-                      coverAll -> 22L
-                      human -> maxOf(humanizer.settleMs(), 30L)
-                      turbo -> 16L
-                      rush -> minOf(settleMs, 20L)
-                      else -> settleMs
-                  }
-                  busyLimitMs = maxEnd + 2000L
-                  tapper.tapTaps(taps) {
-                      nextScanAt = SystemClock.uptimeMillis() + settle
-                      busy = false
-                  }
-              }
-
-              /** How much of a thin same-colour ring surrounds this balloon (0..1). */
-              private fun ringScore(cx: Float, cy: Float, r: Float, c: Int, w: Int, h: Int): Float {
-                  var best = 0f
-                  var k = 24
-                  while (k <= 45) {
-                      val rad = r * k / 20f
-                      var hit = 0; var tot = 0
-                      for (a in 0 until 40) {
-                          val t = a * (Math.PI.toFloat() * 2f / 40f)
-                          val cs = cos(t); val sn = sin(t)
-                          val xi = (cx + cs * (rad - 3)).toInt(); val yi = (cy + sn * (rad - 3)).toInt()
-                          val xo = (cx + cs * (rad + 3)).toInt(); val yo = (cy + sn * (rad + 3)).toInt()
-                          if (xi !in 0 until w || xo !in 0 until w || yi !in 0 until h || yo !in 0 until h) continue
-                          tot++
-                          val sIn = sat[yi * w + xi]; val sOut = sat[yo * w + xo]
-                          for (dr in -1..1) {
-                              val x = (cx + cs * (rad + dr)).toInt(); val y = (cy + sn * (rad + dr)).toInt()
-                              if (x !in 0 until w || y !in 0 until h) continue
-                              val q = y * w + x
-                              if (hueDiff(hue[q], RING_HUE[c]) <= 14f && sat[q] >= 0.2f && sat[q] > sIn + 0.08f && sat[q] > sOut + 0.08f) { hit++; break }
-                          }
-                      }
-                      if (tot >= 20) best = maxOf(best, hit.toFloat() / tot)
-                      k += 1
-                  }
-                  return best
-              }
-
-              /** True if (x, y) lands on (or near) either floating button, so we never tap our own controls. */
-              private fun onOverlay(x: Float, y: Float): Boolean {
-                  val pad = 70
-                  fun hits(params: WindowManager.LayoutParams?, view: android.view.View?): Boolean {
-                      val p = params ?: return false
-                      val v = view ?: return false
-                      val vw = if (v.width > 0) v.width else 400   // fallback if not measured yet
-                      val vh = if (v.height > 0) v.height else 140
-                      return x >= p.x - pad && x <= p.x + vw + pad && y >= p.y - pad && y <= p.y + vh + pad
-                  }
-                  return hits(overlayParams, overlay) || hits(turboParams, turboBtn)
-              }
-
-              private fun updateStats(count: Int) {
-                  val now = SystemClock.uptimeMillis()
-                  if (count > 0) { totalTaps += count; tapLog.addLast(longArrayOf(now, count.toLong())) }
-                  while (tapLog.isNotEmpty() && now - tapLog.first()[0] > 1000) tapLog.removeFirst()
-                  rateNow = tapLog.sumOf { it[1] }
-                  if (rateNow > peakRate) peakRate = rateNow
-                  if (now - lastStatsAt < 250) return
-                  lastStatsAt = now
-                  setButton()
-              }
-              private var lastStatsAt = 0L
-              @Volatile private var rateNow = 0L
-              @Volatile private var peakRate = 0L
-              @Volatile private var onScreen = 0
-              private val colourNames = arrayOf("BLUE", "RED", "YELLOW", "GREEN")
-
-              private fun setButton() {
-                  val rate = rateNow
-                  val rush = SystemClock.uptimeMillis() < frenzyUntil
-                  val txt = when {
-                      captureLost -> "\u21BB RESUME"
-                      running -> "\u25A0 STOP" +
-                              (if (turbo) "   TURBO" else if (rush && !humanizer.on) "   RUSH" else "") +
-                              (if (humanizer.on && !turbo) "   \u00B7 ${humanizer.name}" else "") +
-                              "\n$totalTaps taps  \u00B7  $rate/s  (peak $peakRate)" +
-                              "\n$onScreen on screen  \u00B7  next: ${colourNames[nextSpecial]}"
-                      else -> "\u25B6 START" + (if (totalTaps > 0) "\n$totalTaps taps" else "")
-                  }
-                  val bg = when {
-                      captureLost -> Color.argb(215, 180, 90, 0)
-                      rush && running -> Color.argb(215, 150, 0, 130)
-                      running -> Color.argb(215, 25, 25, 35)
-                      else -> Color.argb(215, 60, 60, 70)
-                  }
-                  mainHandler.post {
-                      overlay?.text = txt
-                      overlay?.setBackgroundColor(bg)
-                  }
-              }
-
-              private fun setTurboButton() {
-                  val txt = when {
-                      captureLost -> "\u21BB RESUME"
-                      running && turbo -> "MACHINE \u2713"
-                      running -> "MACHINE"
-                      else -> "MACHINE + START"
-                  }
-                  val bg = when {
-                      captureLost -> Color.argb(215, 180, 90, 0)
-                      running && turbo -> Color.argb(220, 150, 0, 130)
-                      else -> Color.argb(200, 60, 60, 70)
-                  }
-                  mainHandler.post {
-                      turboBtn?.text = txt
-                      turboBtn?.setBackgroundColor(bg)
-                  }
-              }
-
-              /** A second floating button. Tap it in the last few seconds to blitz the finale at machine
-               *  speed, tap again to hand control back to the human style. Draggable like the main one. */
-              @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
-              private fun showTurboButton() {
-                  val tv = TextView(this).apply {
-                      text = "MACHINE + START"
-                      textSize = 14f
-                      typeface = android.graphics.Typeface.DEFAULT_BOLD
-                      setTextColor(Color.WHITE)
-                      setBackgroundColor(Color.argb(200, 60, 60, 70))
-                      setPadding(36, 24, 36, 24)
-                  }
-                  val params = WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                      PixelFormat.TRANSLUCENT
-                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 520 }
-
-                  var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var moved = false
-                  tv.setOnTouchListener { _, e ->
-                      when (e.action) {
-                          MotionEvent.ACTION_DOWN -> {
-                              downX = e.rawX; downY = e.rawY; startX = params.x; startY = params.y; moved = false
-                          }
-                          MotionEvent.ACTION_MOVE -> {
-                              val dx = e.rawX - downX; val dy = e.rawY - downY
-                              if (abs(dx) > 15 || abs(dy) > 15) moved = true
-                              if (moved) {
-                                  params.x = startX + dx.toInt(); params.y = startY + dy.toInt()
-                                  try { wm.updateViewLayout(tv, params) } catch (_: Throwable) {}
-                              }
-                          }
-                          MotionEvent.ACTION_UP -> if (!moved) {
-                              when {
-                                  captureLost -> resumeCapture()          // this button resumes too
-                                  !running -> { running = true; turbo = true; busy = false; saveRunning(true) }  // MACHINE + START
-                                  else -> { turbo = !turbo; busy = false }  // toggle machine while running
-                              }
-                              setTurboButton()
-                              setButton()
-                          }
-                      }
-                      true
-                  }
-                  try { wm.addView(tv, params); turboBtn = tv; turboParams = params; setTurboButton() }
-                  catch (t: Throwable) { Log.e(TAG, "turbo button failed", t) }
+                      p.getBoolean("blue", true), p.getBoolean("red", true),
+                      p.getBoolean("yellow", true), p.getBoolean("green", true))
+                  maxAtOnce = p.getInt("maxAtOnce", 6).coerceIn(1, 20)
+                  skipTopPct = p.getInt("skipTop", 8).coerceIn(0, 90)
               }
 
               private fun saveRunning(on: Boolean) {
@@ -1421,50 +291,213 @@ jobs:
               private fun loadRunning(): Boolean =
                   try { getSharedPreferences("cfg", MODE_PRIVATE).getBoolean("wasRunning", false) } catch (_: Throwable) { false }
 
-              /** Re-ask Android for screen capture after it stopped, then carry on where we left off. */
-              private fun resumeCapture() {
-                  running = true
-                  saveRunning(true)
-                  startActivity(Intent(this, MainActivity::class.java)
-                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                      .putExtra("resume", true))
+              private fun currentScreenSize(): Point {
+                  val s = Point()
+                  if (Build.VERSION.SDK_INT >= 30) { val b = wm.maximumWindowMetrics.bounds; s.set(b.width(), b.height()) }
+                  else @Suppress("DEPRECATION") wm.defaultDisplay.getRealSize(s)
+                  return s
               }
 
-              /** Re-request capture on its own, but not more than once every few seconds (no dialog spam). */
-              private var lastResumeAt = 0L
+              private fun startCapture(code: Int, data: Intent) {
+                  val size = currentScreenSize()
+                  screenW = size.x; screenH = size.y
+                  val w = screenW / SCALE; val h = screenH / SCALE
+                  val mpm = getSystemService(MediaProjectionManager::class.java)
+                  val proj = mpm.getMediaProjection(code, data)
+                  projection = proj
+                  proj.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() {
+                          Log.w(TAG, "projection stopped"); captureLost = true; releaseCapture(); setButton()
+                          if (running || loadRunning()) mainHandler.post { autoResume() }
+                      }
+                  }, handler)
+                  val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+                  reader = r
+                  virtualDisplay = proj.createVirtualDisplay("tapper", w, h,
+                      maxOf(1, resources.displayMetrics.densityDpi / SCALE),
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler)
+              }
+
+              private fun syncCaptureSize() {
+                  val proj = projection ?: return
+                  val size = currentScreenSize()
+                  if ((size.x == screenW && size.y == screenH) || size.x <= 0 || size.y <= 0) return
+                  screenW = size.x; screenH = size.y
+                  val w = screenW / SCALE; val h = screenH / SCALE
+                  try {
+                      val old = reader
+                      val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+                      val vd = virtualDisplay
+                      if (vd != null) { vd.resize(w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE)); vd.surface = r.surface; reader = r }
+                      else { reader = r; virtualDisplay = proj.createVirtualDisplay("tapper", w, h,
+                          maxOf(1, resources.displayMetrics.densityDpi / SCALE),
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler) }
+                      try { old?.close() } catch (_: Throwable) {}
+                      ensureBuffers(w, h)
+                  } catch (t: Throwable) { Log.e(TAG, "resize failed", t) }
+              }
+
+              private fun releaseCapture() {
+                  try { virtualDisplay?.release() } catch (_: Throwable) {}
+                  try { reader?.close() } catch (_: Throwable) {}
+                  val p = projection; projection = null; virtualDisplay = null; reader = null
+                  try { p?.stop() } catch (_: Throwable) {}
+              }
+
               private fun autoResume() {
                   val now = SystemClock.uptimeMillis()
                   if (now - lastResumeAt < 4000) return
                   lastResumeAt = now
-                  try { resumeCapture() } catch (t: Throwable) { Log.e(TAG, "auto resume failed", t) }
+                  try {
+                      running = true; saveRunning(true)
+                      startActivity(Intent(this, MainActivity::class.java)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                          .putExtra("resume", true))
+                  } catch (t: Throwable) { Log.e(TAG, "auto resume failed", t) }
               }
 
-              private fun showDetectionView() {
-                  val v = DetectionView(this)
-                  val params = WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                      PixelFormat.TRANSLUCENT
-                  ).apply {
-                      gravity = Gravity.TOP or Gravity.START
-                      alpha = 0.75f   // below Android's pass-through limit, so taps still reach the game
-                      if (Build.VERSION.SDK_INT >= 28)
-                          layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+              private val loop = object : Runnable {
+                  override fun run() {
+                      try {
+                          val now = SystemClock.uptimeMillis()
+                          if (busy && now - busySince > 2500) busy = false
+                          if (running && projection != null && now - lastSizeCheck > 400) { lastSizeCheck = now; syncCaptureSize() }
+                          if (running && !busy && now >= nextScanAt && reader != null) scanAndTap()
+                          else reader?.acquireLatestImage()?.close()
+                      } catch (t: Throwable) { busy = false; Log.e(TAG, "loop error", t) }
+                      finally { handler.postDelayed(this, loopMs) }
                   }
-                  try { wm.addView(v, params); fxView = v } catch (t: Throwable) { Log.e(TAG, "fx view failed", t) }
               }
 
-              @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+              private fun ensureBuffers(w: Int, h: Int) {
+                  if (w == bw && h == bh) return
+                  bw = w; bh = h; val n = w * h
+                  label = ByteArray(n); seen = BooleanArray(n); stack = IntArray(n); members = IntArray(n)
+              }
+
+              private fun colourMatch(r: Int, g: Int, b: Int): Int {
+                  val mx = maxOf(r, maxOf(g, b)); val mn = minOf(r, minOf(g, b)); val d = mx - mn
+                  if (mx == 0 || d == 0) return -1
+                  val s = d.toFloat() / mx
+                  if (s < 0.30f) return -1
+                  var h = when (mx) { r -> 60f * (g - b) / d; g -> 60f * (b - r) / d + 120f; else -> 60f * (r - g) / d + 240f }
+                  if (h < 0) h += 360f
+                  val v = mx / 255f
+                  for (rule in RULES) if (h >= rule[1] && h <= rule[2] && s >= rule[3] && s <= rule[4] && v >= rule[5]) return rule[0].toInt()
+                  return -1
+              }
+
+              private fun onOverlay(x: Float, y: Float): Boolean {
+                  val p = overlayParams ?: return false
+                  val v = overlay ?: return false
+                  val vw = if (v.width > 0) v.width else 360
+                  val vh = if (v.height > 0) v.height else 130
+                  val pad = 60
+                  return x >= p.x - pad && x <= p.x + vw + pad && y >= p.y - pad && y <= p.y + vh + pad
+              }
+
+              private fun scanAndTap() {
+                  val img = reader?.acquireLatestImage() ?: return
+                  val hits = ArrayList<PointF>()
+                  try {
+                      val plane = img.planes[0]; val buf = plane.buffer
+                      val rowStride = plane.rowStride; val px = plane.pixelStride
+                      val w = img.width; val h = img.height; val limit = buf.limit()
+                      ensureBuffers(w, h)
+                      val sx = screenW.toFloat() / w; val sy = screenH.toFloat() / h
+                      val top = h * skipTopPct / 100
+
+                      if (top > 0) java.util.Arrays.fill(label, 0, minOf(top * w, label.size), (-1).toByte())
+                      for (y in top until h) {
+                          val row = y * rowStride; val kRow = y * w
+                          for (x in 0 until w) {
+                              val i = row + x * px; val k = kRow + x
+                              if (i + 2 >= limit) { label[k] = (-1).toByte(); continue }
+                              label[k] = colourMatch(buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff).toByte()
+                          }
+                      }
+                      java.util.Arrays.fill(seen, false)
+
+                      val targets = ArrayList<FloatArray>()
+                      val total = w * h
+                      for (start in 0 until total) {
+                          val c = label[start].toInt()
+                          if (c < 0 || seen[start]) continue
+                          var sp = 0; stack[sp++] = start; seen[start] = true
+                          var count = 0; var sumX = 0L; var sumY = 0L
+                          var minX = w; var maxX = 0; var minY = h; var maxY = 0
+                          while (sp > 0) {
+                              val idx = stack[--sp]; val x = idx % w; val y = idx / w
+                              members[count++] = idx; sumX += x; sumY += y
+                              if (x < minX) minX = x; if (x > maxX) maxX = x
+                              if (y < minY) minY = y; if (y > maxY) maxY = y
+                              if (x + 1 < w && label[idx + 1].toInt() == c && !seen[idx + 1]) { seen[idx + 1] = true; stack[sp++] = idx + 1 }
+                              if (x > 0 && label[idx - 1].toInt() == c && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
+                              if (y + 1 < h && label[idx + w].toInt() == c && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
+                              if (y > 0 && label[idx - w].toInt() == c && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
+                          }
+                          if (count < 12 || minY <= top) continue
+                          val bwid = maxX - minX + 1; val bhei = maxY - minY + 1
+                          val fill = count.toFloat() / (bwid * bhei)
+                          val aspect = bwid.toFloat() / bhei
+                          val big = maxOf(bwid, bhei)
+                          val cx = sumX.toFloat() / count; val cy = sumY.toFloat() / count
+                          if (big <= 150 && aspect in 0.6f..1.66f && fill >= 0.5f) {
+                              targets.add(floatArrayOf(cx, cy, count.toFloat(), c.toFloat()))
+                          } else if (fill >= 0.30f) {
+                              val cell = 18
+                              val cols = bwid / cell + 1; val rows = bhei / cell + 1
+                              val cnt = IntArray(cols * rows); val gx = LongArray(cols * rows); val gy = LongArray(cols * rows)
+                              for (m in 0 until count) {
+                                  val idx = members[m]; val x = idx % w; val y = idx / w
+                                  val gI = ((y - minY) / cell) * cols + (x - minX) / cell
+                                  cnt[gI]++; gx[gI] += x.toLong(); gy[gI] += y.toLong()
+                              }
+                              for (gI in 0 until cols * rows) if (cnt[gI] >= cell * cell * 0.40f)
+                                  targets.add(floatArrayOf(gx[gI].toFloat() / cnt[gI], gy[gI].toFloat() / cnt[gI], cnt[gI].toFloat(), c.toFloat()))
+                          }
+                      }
+
+                      targets.sortBy { it[1] }   // topmost (closest to escaping) first
+                      for (t in targets) {
+                          if (hits.size >= maxAtOnce) break
+                          if (!enabledColours[t[3].toInt()]) continue
+                          val bx = ((t[0] + 0.5f) * sx).coerceIn(1f, screenW - 2f)
+                          val by = ((t[1] + 0.5f) * sy).coerceIn(1f, screenH - 2f)
+                          if (onOverlay(bx, by)) continue
+                          hits.add(PointF(bx, by))
+                      }
+                  } finally { try { img.close() } catch (_: Throwable) {} }
+
+                  if (hits.isEmpty()) return
+                  val tapper = TapService.instance
+                  if (tapper == null) { mainHandler.post { overlay?.text = "TURN ON TAP SERVICE\nin Accessibility settings" }; return }
+                  busy = true; busySince = SystemClock.uptimeMillis()
+                  tapper.tapAll(hits, holdMs) { nextScanAt = SystemClock.uptimeMillis() + settleMs; busy = false }
+                  totalTaps += hits.size
+                  setButton()
+              }
+
+              private fun setButton() {
+                  val txt = when {
+                      captureLost -> "↻ RESUME"
+                      running -> "■ STOP" + (if (totalTaps > 0) "\n$totalTaps taps" else "")
+                      else -> "▶ START" + (if (totalTaps > 0) "\n$totalTaps taps" else "")
+                  }
+                  val bg = when {
+                      captureLost -> Color.argb(215, 180, 90, 0)
+                      running -> Color.argb(215, 25, 25, 35)
+                      else -> Color.argb(215, 60, 60, 70)
+                  }
+                  mainHandler.post { overlay?.text = txt; overlay?.setBackgroundColor(bg) }
+              }
+
+              @android.annotation.SuppressLint("ClickableViewAccessibility", "SetTextI18n")
               private fun showOverlay() {
                   val tv = TextView(this).apply {
-                      text = "\u25B6 START"
-                      textSize = 14f
+                      text = "▶ START"; textSize = 14f
                       typeface = android.graphics.Typeface.DEFAULT_BOLD
-                      setTextColor(Color.WHITE)
-                      setBackgroundColor(Color.argb(200, 30, 30, 30))
-                      setPadding(36, 24, 36, 24)
+                      setTextColor(Color.WHITE); setBackgroundColor(Color.argb(200, 30, 30, 30)); setPadding(36, 24, 36, 24)
                   }
                   val params = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -1472,61 +505,38 @@ jobs:
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
                       PixelFormat.TRANSLUCENT
                   ).apply { gravity = Gravity.TOP or Gravity.START; x = 30; y = 300 }
-
-                  var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
-                  var downTime = 0L; var moved = false
+                  var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var downTime = 0L; var moved = false
                   tv.setOnTouchListener { _, e ->
                       when (e.action) {
-                          MotionEvent.ACTION_DOWN -> {
-                              downX = e.rawX; downY = e.rawY; startX = params.x; startY = params.y
-                              downTime = SystemClock.uptimeMillis(); moved = false
-                          }
+                          MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; startX = params.x; startY = params.y; downTime = SystemClock.uptimeMillis(); moved = false }
                           MotionEvent.ACTION_MOVE -> {
                               val dx = e.rawX - downX; val dy = e.rawY - downY
                               if (abs(dx) > 15 || abs(dy) > 15) moved = true
-                              if (moved) {
-                                  params.x = startX + dx.toInt(); params.y = startY + dy.toInt()
-                                  try { wm.updateViewLayout(tv, params) } catch (_: Throwable) {}
-                              }
+                              if (moved) { params.x = startX + dx.toInt(); params.y = startY + dy.toInt(); try { wm.updateViewLayout(tv, params) } catch (_: Throwable) {} }
                           }
                           MotionEvent.ACTION_UP -> if (!moved) {
                               when {
-                                  SystemClock.uptimeMillis() - downTime > 800 -> { saveRunning(false); stopSelf() }   // long-press = quit
-                                  captureLost -> resumeCapture()
-                                  else -> {
-                                      running = !running
-                                      saveRunning(running)
-                                      if (running) { turbo = false; peakRate = 0L }   // fresh run, fresh peak
-                                      else { turbo = false; fxView?.setTargets(FloatArray(0)) }
-                                      busy = false
-                                      setButton()
-                                      setTurboButton()
-                                  }
+                                  SystemClock.uptimeMillis() - downTime > 800 -> { saveRunning(false); stopSelf() }
+                                  captureLost -> autoResume()
+                                  else -> { running = !running; saveRunning(running); busy = false; setButton() }
                               }
                           }
                       }
                       true
                   }
                   try { wm.addView(tv, params) } catch (t: Throwable) { Log.e(TAG, "overlay failed", t) }
-                  overlay = tv
-                  overlayParams = params
+                  overlay = tv; overlayParams = params
               }
 
               override fun onDestroy() {
                   running = false
                   overlay?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
-                  overlay = null
-                  turboBtn?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
-                  turboBtn = null
-                  fxView?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
-                  fxView = null
-                  releaseCapture()
+                  overlay = null; releaseCapture()
                   if (::thread.isInitialized) { handler.removeCallbacksAndMessages(null); thread.quitSafely() }
                   super.onDestroy()
               }
           }
           ENDOFFILE
-          mkdir -p app/src/main/java/com/example/balloontapper
           cat > app/src/main/java/com/example/balloontapper/MainActivity.kt <<'ENDOFFILE'
           package com.example.balloontapper
 
@@ -1545,74 +555,29 @@ jobs:
 
               private lateinit var status: TextView
               private var checks: List<CheckBox> = emptyList()
-              private lateinit var speedGroup: RadioGroup
-              private lateinit var styleGroup: RadioGroup
-              private lateinit var fxCheck: CheckBox
-              private lateinit var comboCheck: CheckBox
-              private lateinit var coverCheck: CheckBox
-              private lateinit var qualityGroup: RadioGroup
-              private lateinit var gapInput: EditText
-              private lateinit var maxTaps: EditText
+              private lateinit var maxAtOnce: EditText
               private lateinit var skipTop: EditText
-              private lateinit var fingersHuman: EditText
-              private lateinit var fingersMachine: EditText
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
                   val pad = (16 * resources.displayMetrics.density).toInt()
-
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(pad, pad * 2, pad, pad)
-                  }
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad * 2, pad, pad) }
                   fun label(t: String) = TextView(this).apply { text = t; setPadding(0, pad, 0, 0) }
-                  fun button(t: String, onClick: (View) -> Unit) =
-                      Button(this).apply { text = t; setOnClickListener(onClick) }
+                  fun button(t: String, onClick: (View) -> Unit) = Button(this).apply { text = t; setOnClickListener(onClick) }
 
                   status = TextView(this).apply { textSize = 15f }
                   root.addView(status)
 
-                  root.addView(label("Balloon colours to pop (grey balloons are always skipped)"))
+                  root.addView(label("Balloon colours to pop (grey is always skipped)"))
                   val colourNames = listOf("blue" to "Blue", "red" to "Red", "yellow" to "Yellow", "green" to "Green")
                   checks = colourNames.map { (key, name) ->
                       CheckBox(this).apply { text = name; isChecked = prefs.getBoolean(key, true); tag = key }.also { root.addView(it) }
                   }
 
-                  comboCheck = CheckBox(this).apply {
-                      text = "Combo mode: never miss Blue & Red (still pops Yellow & Green too)"
-                      isChecked = prefs.getBoolean("combo", false)
-                  }
-                  root.addView(comboCheck)
-
-                  coverCheck = CheckBox(this).apply {
-                      text = "Tap every balloon non-stop (keeps human timing, no breaks or misses)"
-                      isChecked = prefs.getBoolean("coverAll", false)
-                  }
-                  root.addView(coverCheck)
-
-                  root.addView(label("Max taps per scan"))
-                  maxTaps = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxTaps", 6).toString()) }
-                  root.addView(maxTaps)
-
-                  root.addView(label("Fingers in normal play (1 = one thumb, steadiest)"))
-                  fingersHuman = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersHuman", 1).toString()) }
-                  root.addView(fingersHuman)
-
-                  root.addView(label("Fingers in machine / turbo mode (more = faster, heavier on the phone)"))
-                  fingersMachine = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("fingersMachine", 1).toString()) }
-                  root.addView(fingersMachine)
-
-                  root.addView(label("Detection quality (sharper aim & better recognition = heavier)"))
-                  // radio id encodes the downscale: id = 300 + scale (smaller scale = sharper)
-                  val qualityOpts = listOf(3 to "Sharp - best aim, heaviest", 4 to "Balanced (recommended)",
-                      6 to "Light - faster, coarser", 8 to "Very light - lightest, roughest")
-                  qualityGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-                  qualityOpts.forEach { (sc, name) ->
-                      qualityGroup.addView(RadioButton(this).apply { text = name; id = 300 + sc })
-                  }
-                  qualityGroup.check(300 + prefs.getInt("scale", 4).coerceIn(3, 8))
-                  root.addView(qualityGroup)
+                  root.addView(label("How many balloons to tap at once (higher = more, but heavier on the phone)"))
+                  maxAtOnce = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("maxAtOnce", 6).toString()) }
+                  root.addView(maxAtOnce)
 
                   root.addView(label("Ignore top % of screen (score bar etc.)"))
                   skipTop = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("skipTop", 8).toString()) }
@@ -1624,53 +589,6 @@ jobs:
                   root.addView(button("2. Turn on tap service (Accessibility)") {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
-                  fxCheck = CheckBox(this).apply { text = "Live detection view (rings + tap bursts) \u2014 costs battery"; isChecked = prefs.getBoolean("fx", false) }
-                  root.addView(fxCheck)
-
-                  root.addView(label("Play style"))
-                  val styleNames = listOf(
-                      "Machine - instant, perfect aim, never stops",
-                      "Human - casual (about 4 taps a second, takes breaks)",
-                      "Human - focused (about 6-7 a second, steady aim)",
-                      "Human - rapid (about 10 a second, looser aim for it)"
-                  )
-                  styleGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-                  styleNames.forEachIndexed { i, name ->
-                      styleGroup.addView(RadioButton(this).apply { text = name; id = 200 + i })
-                  }
-                  styleGroup.check(200 + prefs.getInt("human", Humanizer.FOCUSED))
-                  root.addView(styleGroup)
-
-                  // The two settings below are the machine's fixed rhythm. The human styles work out
-                  // their own timings tap by tap, so these grey out whenever a human style is picked.
-                  val speedLabel = label("Tap speed (machine style only)")
-                  root.addView(speedLabel)
-                  val speedNames = listOf("Relaxed (1 tap every 120 ms)", "Normal (1 tap every 70 ms)", "Quick (1 tap every 40 ms)")
-                  speedGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-                  speedNames.forEachIndexed { i, name ->
-                      speedGroup.addView(RadioButton(this).apply { text = name; id = 100 + i })
-                  }
-                  speedGroup.check(100 + prefs.getInt("speed", 1))
-                  root.addView(speedGroup)
-
-                  val gapLabel = label("Fixed gap between taps in ms (machine style only, 0 = use the speed above)")
-                  root.addView(gapLabel)
-                  gapInput = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText(prefs.getInt("gapMs", 0).toString()) }
-                  root.addView(gapInput)
-
-                  fun showMachineSettings() {
-                      val machine = styleGroup.checkedRadioButtonId == 200 + Humanizer.OFF
-                      val dim = if (machine) 1f else 0.35f
-                      speedLabel.alpha = dim
-                      gapLabel.alpha = dim
-                      speedGroup.alpha = dim
-                      gapInput.alpha = dim
-                      gapInput.isEnabled = machine
-                      for (i in 0 until speedGroup.childCount) speedGroup.getChildAt(i).isEnabled = machine
-                  }
-                  styleGroup.setOnCheckedChangeListener { _, _ -> showMachineSettings() }
-                  showMachineSettings()
-
                   root.addView(button("3. Stop battery saver killing the app") {
                       val pm = getSystemService(android.os.PowerManager::class.java)
                       if (pm.isIgnoringBatteryOptimizations(packageName)) toast("Already allowed")
@@ -1682,39 +600,23 @@ jobs:
                   if (intent?.getBooleanExtra("resume", false) == true) root.post { launch() }
               }
 
-              override fun onNewIntent(intent: Intent) {
-                  super.onNewIntent(intent)
-                  if (intent.getBooleanExtra("resume", false)) launch()
-              }
+              override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); if (intent.getBooleanExtra("resume", false)) launch() }
 
               override fun onResume() {
                   super.onResume()
-                  val overlayOk = Settings.canDrawOverlays(this)
-                  val tapOk = TapService.instance != null
-                  status.text = "Floating button permission: ${if (overlayOk) "OK" else "NO"}\n" +
-                          "Tap service: ${if (tapOk) "OK" else "NO"}"
+                  status.text = "Floating button permission: ${if (Settings.canDrawOverlays(this)) "OK" else "NO"}\n" +
+                          "Tap service: ${if (TapService.instance != null) "OK" else "NO"}"
               }
 
               private fun launch() {
                   val ed = getSharedPreferences("cfg", MODE_PRIVATE).edit()
                   checks.forEach { ed.putBoolean(it.tag as String, it.isChecked) }
-                  ed.putBoolean("fx", fxCheck.isChecked)
-                  ed.putBoolean("combo", comboCheck.isChecked)
-                  ed.putBoolean("coverAll", coverCheck.isChecked)
-                  ed.putInt("scale", (qualityGroup.checkedRadioButtonId - 300).coerceIn(3, 8))
-                  ed.putInt("gapMs", gapInput.text.toString().toIntOrNull()?.let { if (it <= 0) 0 else it.coerceIn(5, 2000) } ?: 0)
-                  ed.putInt("speed", (speedGroup.checkedRadioButtonId - 100).coerceIn(0, 2))
-                  ed.putInt("human", (styleGroup.checkedRadioButtonId - 200).coerceIn(0, 3))
-                  ed.putInt("maxTaps", maxTaps.text.toString().toIntOrNull()?.coerceIn(1, 30) ?: 6)
-                      .putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
-                      .putInt("fingersHuman", fingersHuman.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 1)
-                      .putInt("fingersMachine", fingersMachine.text.toString().toIntOrNull()?.coerceIn(1, 5) ?: 1)
-                      .apply()
-
+                  ed.putInt("maxAtOnce", maxAtOnce.text.toString().toIntOrNull()?.coerceIn(1, 20) ?: 6)
+                  ed.putInt("skipTop", skipTop.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 8)
+                  ed.apply()
                   if (!Settings.canDrawOverlays(this)) { toast("Do step 1 first"); return }
                   if (TapService.instance == null) { toast("Do step 2 first"); return }
                   if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
-
                   val mpm = getSystemService(MediaProjectionManager::class.java)
                   @Suppress("DEPRECATION")
                   startActivityForResult(mpm.createScreenCaptureIntent(), 1)
@@ -1726,8 +628,7 @@ jobs:
                   super.onActivityResult(requestCode, resultCode, data)
                   if (requestCode != 1) return
                   if (resultCode != RESULT_OK || data == null) { toast("Screen capture is needed to find balloons"); return }
-                  startForegroundService(Intent(this, CaptureService::class.java)
-                      .putExtra("code", resultCode).putExtra("data", data))
+                  startForegroundService(Intent(this, CaptureService::class.java).putExtra("code", resultCode).putExtra("data", data))
                   toast("Open your game and tap START")
                   moveTaskToBack(true)
               }
