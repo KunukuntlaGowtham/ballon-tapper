@@ -1135,10 +1135,13 @@ jobs:
                               if ((ages[bl] ?: 0f) < reactMs) continue   // the eyes haven't caught it yet
                               if (humanizer.ignores()) continue          // looked straight past it
                           }
-                          val guard = maxOf(sqrt(bl[2] / 3.14f) * sx * 0.7f, minGuard)
-                          var blocked = false
-                          for (t in recentTaps) if (hypot(t[0] - bx, t[1] - by) < guard) { blocked = true; break }
-                          if (blocked) continue
+                          if (!coverAll) {
+                              // normal modes space taps out; cover-all hits every balloon every scan
+                              val guard = maxOf(sqrt(bl[2] / 3.14f) * sx * 0.7f, minGuard)
+                              var blocked = false
+                              for (t in recentTaps) if (hypot(t[0] - bx, t[1] - by) < guard) { blocked = true; break }
+                              if (blocked) continue
+                          }
                           val p = aim(bl)
                           if (onOverlay(p.x, p.y)) continue
                           hits.add(p)
